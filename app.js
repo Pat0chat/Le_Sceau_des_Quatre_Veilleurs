@@ -1,7 +1,7 @@
 'use strict';
 
 const DEFAULT_CONFIG = {
-  version: 3,
+  version: 4,
   gmPin: '4826',
   treasureCode: '3147',
   locations: {
@@ -16,6 +16,8 @@ const DEFAULT_CONFIG = {
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const app = $('#app');
+const LOCAL_TEST = new URLSearchParams(window.location.search).get('test') === '1';
+let simulatedPosition = false;
 
 function clone(v){ return JSON.parse(JSON.stringify(v)); }
 function loadConfig(){
@@ -58,11 +60,23 @@ let currentPosition = null;
 let geoWatchId = null;
 let lastGeoError = null;
 let wakeLock = null;
+let audioCtx = null;
+let ambientNodes = [];
+let soundEnabled = localStorage.getItem('veilleurs_sound') !== 'off';
 
 function haptic(ms = 80){ try { navigator.vibrate?.(ms); } catch {} }
-function tone(freq = 130, dur = .18, type = 'sine', vol = .035){
+function getAudioCtx(){
+  if(!soundEnabled) return null;
   try {
-    const A = new (window.AudioContext || window.webkitAudioContext)();
+    if(!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if(audioCtx.state === 'suspended') audioCtx.resume();
+    return audioCtx;
+  } catch { return null; }
+}
+function tone(freq = 130, dur = .18, type = 'sine', vol = .035){
+  if(!soundEnabled) return;
+  try {
+    const A = getAudioCtx(); if(!A) return;
     const o = A.createOscillator(), g = A.createGain();
     o.type = type; o.frequency.value = freq; g.gain.value = vol;
     o.connect(g); g.connect(A.destination); o.start();
@@ -70,10 +84,52 @@ function tone(freq = 130, dur = .18, type = 'sine', vol = .035){
     o.stop(A.currentTime + dur);
   } catch {}
 }
+function startAmbient(){
+  if(!soundEnabled || ambientNodes.length) return;
+  try {
+    const A = getAudioCtx(); if(!A) return;
+    const master = A.createGain(); master.gain.value = .012;
+    const filter = A.createBiquadFilter(); filter.type = 'lowpass'; filter.frequency.value = 420;
+    master.connect(filter); filter.connect(A.destination);
+    const o1=A.createOscillator(), o2=A.createOscillator(), lfo=A.createOscillator(), lfoGain=A.createGain();
+    o1.type='sine'; o1.frequency.value=55; o2.type='triangle'; o2.frequency.value=82.5;
+    lfo.frequency.value=.07; lfoGain.gain.value=.0035; lfo.connect(lfoGain); lfoGain.connect(master.gain);
+    o1.connect(master); o2.connect(master); o1.start(); o2.start(); lfo.start();
+    ambientNodes=[o1,o2,lfo,master,filter,lfoGain];
+  } catch {}
+}
+function stopAmbient(){
+  ambientNodes.forEach(n=>{ try{ n.stop?.(); }catch{} try{ n.disconnect?.(); }catch{} });
+  ambientNodes=[];
+}
+function updateSoundButton(){
+  const b=$('#soundButton'); if(!b) return;
+  b.textContent=soundEnabled?'🔊':'🔇';
+  b.setAttribute('aria-label', soundEnabled?'Désactiver l’ambiance sonore':'Activer l’ambiance sonore');
+}
 function footsteps(){ tone(95,.12,'triangle',.025); setTimeout(()=>tone(75,.14,'triangle',.025),280); }
 function bell(){ tone(196,.55,'sine',.035); setTimeout(()=>tone(98,.8,'sine',.02),90); }
 function successSound(){ tone(293,.12,'sine',.025); setTimeout(()=>tone(440,.18,'sine',.03),130); }
-function failSound(){ tone(90,.18,'sawtooth',.025); }
+function failSound(){ tone(90,.18,'sawtooth',.025); document.body.classList.remove('failure-pulse'); void document.body.offsetWidth; document.body.classList.add('failure-pulse'); }
+function omen(title, subtitle=''){
+  const old=document.querySelector('.scene-omen'); if(old) old.remove();
+  const el=document.createElement('div'); el.className='scene-omen';
+  el.innerHTML=`<div class="omen-rune">✦</div><div class="omen-title">${escapeHtml(title)}</div>${subtitle?`<div class="omen-sub">${escapeHtml(subtitle)}</div>`:''}`;
+  document.body.appendChild(el);
+  requestAnimationFrame(()=>el.classList.add('show'));
+  setTimeout(()=>el.classList.add('leave'),1100);
+  setTimeout(()=>el.remove(),1900);
+}
+function initAtmosphere(){
+  const box=$('#ambientRunes'); if(!box || box.children.length) return;
+  const runes=['ᚱ','✦','◊','☾','ᛉ','ᚾ','ᛟ','ᚨ','✧','ᛃ','ᛏ','◇'];
+  runes.forEach((r,i)=>{
+    const s=document.createElement('span'); s.textContent=r;
+    s.style.left=`${5+(i*17)%91}%`; s.style.top=`${10+(i*29)%82}%`;
+    s.style.animationDelay=`-${(i*2.7)%15}s`; s.style.animationDuration=`${16+(i%5)*3}s`;
+    box.appendChild(s);
+  });
+}
 
 function escapeHtml(s=''){ return String(s).replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c])); }
 function meters(a,b){
@@ -88,9 +144,19 @@ function distanceTo(key){ return meters(currentPosition, targetPoint(key)); }
 function fmtDistance(m){ if(!Number.isFinite(m)) return '—'; if(m < 1000) return `${Math.max(0, Math.round(m))} m`; return `${(m/1000).toFixed(2).replace('.', ',')} km`; }
 function geoOk(){ return currentPosition && Number.isFinite(currentPosition.lat) && Number.isFinite(currentPosition.lon); }
 function geoStatusHtml(){
+  if(LOCAL_TEST && !geoOk()) return `<div class="status test-status"><span><span class="dot test"></span> Mode test local</span><span class="small">Position à simuler</span></div>`;
+  if(LOCAL_TEST && geoOk()) return `<div class="status test-status"><span><span class="dot test"></span> GPS simulé</span><span class="small">${fmtDistance(distanceToTestTarget())}</span></div>`;
   if(geoOk()) return `<div class="status"><span><span class="dot ok"></span> GPS actif</span><span class="small">± ${Math.round(currentPosition.accuracy || 0)} m</span></div>`;
   if(lastGeoError) return `<div class="status"><span><span class="dot bad"></span> GPS indisponible</span><span class="small">${escapeHtml(lastGeoError)}</span></div>`;
   return `<div class="status"><span><span class="dot"></span> Recherche GPS…</span><span class="small">Autorisez la position</span></div>`;
+}
+function distanceToTestTarget(){
+  if(!LOCAL_TEST || !geoOk()) return Infinity;
+  if(state.screen === 'gate-mairie') return distanceTo('mairie');
+  if(state.screen === 'gate-eglise') return distanceTo('eglise');
+  if(state.screen === 'gate-fontaine') return distanceTo('fontaine');
+  if(state.screen === 'walk' || state.screen === 'gate-chapelle') return distanceTo('chapelle');
+  return 0;
 }
 function progressHtml(n){ return `<div class="progress">${[1,2,3,4].map(i=>`<i class="${i<=n?'on':''}"></i>`).join('')}</div>`; }
 function card(inner, cls=''){ return `<section class="card ${cls}">${inner}</section>`; }
@@ -108,8 +174,42 @@ function chapterBadge(title, subtitle=''){ return `<div class="chapter-badge"><s
 function loreBlock(title, text){ return `<div class="lore-block"><div class="lore-title">${escapeHtml(title)}</div><p>${text}</p></div>`; }
 function destinationBlock(title, detail, note=''){ return `<div class="destination-block"><div class="destination-icon">⌖</div><div><div class="destination-title">${escapeHtml(title)}</div><div class="destination-detail">${escapeHtml(detail)}</div>${note?`<div class="destination-note">${escapeHtml(note)}</div>`:''}</div></div>`; }
 
+function illustrationSvg(kind){
+  const svgs={
+    book:`<svg viewBox="0 0 320 180" role="img" aria-label="Livre des Veilleurs"><defs><linearGradient id="g1" x1="0" x2="1"><stop offset="0" stop-color="#b0864e"/><stop offset="1" stop-color="#f0d49a"/></linearGradient></defs><rect x="22" y="24" width="276" height="132" rx="16" fill="#140f17" stroke="#6f5842"/><path d="M42 42h100c18 0 28 7 38 16v76c-10-9-20-16-38-16H42z" fill="#241826" stroke="#d7ae67"/><path d="M278 42H178c-18 0-28 7-38 16v76c10-9 20-16 38-16h100z" fill="#1a131d" stroke="#d7ae67"/><path d="M160 39v100" stroke="url(#g1)" stroke-width="3" opacity=".9"/><circle cx="86" cy="78" r="18" fill="none" stroke="#d7ae67"/><path d="M86 60v36M68 78h36" stroke="#d7ae67"/><circle cx="234" cy="78" r="18" fill="none" stroke="#d7ae67"/><path d="M234 60l10 18-10 18-10-18z" fill="none" stroke="#d7ae67"/><text x="77" y="128" fill="#eeddba" font-size="18">1292</text><text x="207" y="128" fill="#eeddba" font-size="18">✦ ✦ ✦</text></svg>`,
+    stone:`<svg viewBox="0 0 320 180" role="img" aria-label="Énigme de pierre"><rect width="320" height="180" rx="18" fill="#120e15"/><path d="M44 152h232" stroke="#6f625b"/><path d="M70 146V86l48-34 48 34v60z" fill="#282029" stroke="#d7ae67"/><path d="M166 146V74l38-28 38 28v72z" fill="#201821" stroke="#cba56a"/><path d="M188 88h31v58h-31z" fill="#130f17" stroke="#9b7d50"/><circle cx="117" cy="86" r="11" fill="none" stroke="#d7ae67"/><path d="M117 74v24M105 86h24" stroke="#d7ae67"/><text x="95" y="134" fill="#efe2c6" font-size="24" letter-spacing="3">1828</text><path d="M250 52c8 10 12 22 12 35" stroke="#9986b7" fill="none"/><path d="M245 63l13-8 7 14" stroke="#9986b7" fill="none"/></svg>`,
+    water:`<svg viewBox="0 0 320 180" role="img" aria-label="Gardien des eaux"><rect width="320" height="180" rx="18" fill="#0f1218"/><path d="M32 122h256v28H32z" fill="#2a313d" stroke="#7ea6bb"/><path d="M48 58h224v64H48z" fill="#1f2831" stroke="#d7ae67"/><text x="132" y="76" fill="#f0deba" font-size="20">1861</text><path d="M153 105c14-20 36-18 47 0-8 7-9 17-30 17-10 0-15-4-17-17z" fill="#5f879a" stroke="#d7ae67"/><circle cx="176" cy="99" r="3" fill="#f7f0df"/><path d="M198 84v32M190 92h16M192 101h12" stroke="#d7ae67" stroke-width="3"/><path d="M72 132c24-9 40-9 64 0M136 132c24-9 40-9 64 0M200 132c24-9 40-9 64 0" stroke="#76abc0" fill="none"/></svg>`,
+    walk:`<svg viewBox="0 0 320 180" role="img" aria-label="Marche vers Layer"><rect width="320" height="180" rx="18" fill="#0c0c11"/><circle cx="250" cy="42" r="20" fill="#f0d49a" opacity=".9"/><path d="M18 150c35-42 74-62 112-62 42 0 69 22 95 22 24 0 46-8 78-34" stroke="#d7ae67" stroke-width="3" fill="none"/><path d="M0 160h320" stroke="#4c4455"/><path d="M66 150l20-44 20 44z" fill="#18141c" stroke="#8e7a59"/><path d="M130 150l28-58 28 58z" fill="#17131b" stroke="#8e7a59"/><path d="M220 70c-7 7-14 9-22 6 8 3 14 9 17 17" stroke="#9f8fba" fill="none"/><text x="42" y="44" fill="#e8ddc8" font-size="18">Layer</text></svg>`,
+    chapel:`<svg viewBox="0 0 320 180" role="img" aria-label="Chapelle Sainte-Madeleine"><rect width="320" height="180" rx="18" fill="#111015"/><path d="M44 148h230" stroke="#5d5664"/><path d="M70 148V90l48-30 48 30v58z" fill="#221a24" stroke="#d7ae67"/><path d="M166 148V82l28-18 28 18v66z" fill="#1b151e" stroke="#d7ae67"/><path d="M188 98h12v50h-12z" fill="#0f0c12" stroke="#9f855a"/><circle cx="214" cy="48" r="27" fill="none" stroke="#d7ae67" opacity=".85"/><path d="M214 24l7 15 16 2-12 11 3 16-14-8-14 8 3-16-12-11 16-2z" fill="none" stroke="#d7ae67"/></svg>`,
+    treasure:`<svg viewBox="0 0 320 180" role="img" aria-label="Trésor"><rect width="320" height="180" rx="18" fill="#100d14"/><path d="M76 124h168v22H76z" fill="#332216" stroke="#d7ae67"/><path d="M86 80h148c18 0 30 12 30 26v18H56v-18c0-14 12-26 30-26z" fill="#4b3220" stroke="#d7ae67"/><path d="M160 80v66" stroke="#d7ae67"/><rect x="148" y="102" width="24" height="22" rx="4" fill="#c5a161" stroke="#f5e2bd"/><path d="M52 46l20 10M258 40l-20 12M108 38l10 16M212 36l-10 16" stroke="#f0d49a"/><circle cx="72" cy="52" r="3" fill="#f0d49a"/><circle cx="248" cy="56" r="3" fill="#f0d49a"/></svg>`
+  };
+  return svgs[kind] || svgs.book;
+}
+function illustrationBlock(kind, title='', caption=''){
+  return `<figure class="illustration-card ${kind}"><div class="illustration-frame">${illustrationSvg(kind)}</div>${title||caption?`<figcaption><strong>${escapeHtml(title)}</strong>${caption?`<span>${escapeHtml(caption)}</span>`:''}</figcaption>`:''}</figure>`;
+}
+function sealBurstHtml(icon){
+  const parts = Array.from({length:18}, (_,i)=>`<i style="--ang:${i*20}deg;--dist:${62 + (i%4)*12}px;--delay:${(i%5)*0.04}s"></i>`).join('');
+  return `<div class="seal-recovery-visual"><div class="seal-halo"></div><div class="seal-core">${icon}</div><div class="seal-burst">${parts}</div><div class="seal-rings"><span></span><span></span><span></span></div></div>`;
+}
+function sealRecoveredSound(){
+  if(!soundEnabled) return;
+  tone(196,.09,'triangle',.022);
+  setTimeout(()=>tone(247,.11,'triangle',.024),90);
+  setTimeout(()=>tone(294,.14,'sine',.026),180);
+  setTimeout(()=>tone(392,.26,'sine',.028),270);
+  setTimeout(()=>tone(523,.34,'sine',.02),390);
+}
+function revealSound(){
+  if(!soundEnabled) return;
+  tone(140,.08,'sawtooth',.012);
+  setTimeout(()=>tone(220,.1,'triangle',.013),70);
+  setTimeout(()=>tone(330,.14,'sine',.015),140);
+}
+
 async function requestWakeLock(){ try { if('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen'); } catch {} }
 function startGeo(){
+  if(LOCAL_TEST) return;
   if(!navigator.geolocation){ lastGeoError = 'Géolocalisation non prise en charge'; return; }
   if(geoWatchId !== null) return;
   geoWatchId = navigator.geolocation.watchPosition(pos => {
@@ -142,6 +242,7 @@ function renderHome(){
       <p class="hero-subtitle">Un récit de pierre, d’eau, d’ombre et de serment.</p>
       ${progressHtml(state.completed.length>=6?4:Math.min(3,Object.keys(state.fragments).length))}
       ${card(`${chapterBadge('Livre des Veilleurs','Préface')}
+        ${illustrationBlock('book','Le Livre des Veilleurs','Le récit ancien se rouvre au moment où le sceau vacille.')}
         <p class="story dropcap">Il y a bien longtemps, quatre Veilleurs se sont réunis pour enfermer une présence sans nom sous la pierre de Layer. Leur serment a traversé les siècles. Cette nuit, le sceau faiblit. Si les quatre marques ne sont pas retrouvées avant la tombée du soir, l’Ombre quittera son sommeil.</p>
         ${loreBlock('Votre mission', 'Suivez les traces des anciens gardiens, résolvez les énigmes et reconstituez le sceau. Chacun des quatre joueurs recevra un fragment secret : aucune victoire n’est possible sans les autres.')}
         <p class="small">Le GPS reste sur ce téléphone. Aucune position n’est envoyée à un serveur.</p>
@@ -149,7 +250,7 @@ function renderHome(){
         ${state.startedAt ? btn('Recommencer depuis le début', 'resetBtn', 'secondary') : ''}
       `, 'hero-card')}
     </div>`;
-  $('#startBtn').onclick = ()=>{ if(!state.startedAt) state.startedAt = Date.now(); saveState(); requestWakeLock(); startGeo(); renderPrologue(); };
+  $('#startBtn').onclick = ()=>{ if(!state.startedAt) state.startedAt = Date.now(); saveState(); requestWakeLock(); startGeo(); startAmbient(); renderPrologue(); };
   $('#resetBtn')?.addEventListener('click', ()=>{ if(confirm('Effacer toute la progression ?')) resetGame(); });
 }
 
@@ -159,6 +260,7 @@ function renderPrologue(){
     ${chapterBadge('Prologue','Le Pacte des Quatre')}
     <h2>Le Livre s’ouvre</h2>
     <p class="quote">1292. Lorsque la chapelle de Layer s’éleva sur la roche, quatre Veilleurs lièrent leurs forces pour y enfermer l’Ombre. Chacun prit un rôle. Chacun garda une part du sceau.</p>
+    ${illustrationBlock('book','L’appel des anciens','Quatre rôles, quatre fragments, un même serment.')}
     <p class="story">Aujourd’hui, ce sceau s’est fissuré. Les noms des anciens gardiens ont disparu, mais le Livre a reconnu quatre nouveaux porteurs : Vadim, Louise, Soline et Sacha.</p>
     ${loreBlock('Le danger', 'Si les quatre marques ne sont pas retrouvées, le passage de Layer s’ouvrira de nouveau. Le village tout entier tombera sous la garde de l’Ombre.')}
     <p class="center"><strong>Vous avez deux heures.</strong></p>
@@ -181,6 +283,7 @@ function renderGateMairie(){
     <h2>Rejoindre le point d’éveil</h2>
     <p class="story">Le Livre ne peut prononcer la suite qu’au lieu où les nouveaux Veilleurs sont appelés. Rejoignez le cœur du village pour entendre la première injonction.</p>
     ${destinationBlock('Repère du Livre', 'Mairie de Bissey-la-Côte — 9 rue Haute', 'Le sceau se déverrouillera automatiquement à proximité.')}
+    ${illustrationBlock('book','Le point d’éveil','Le Livre désigne le lieu du départ avant d’ouvrir la première direction.')}
     <div id="geoStatus">${geoStatusHtml()}</div>
     <div class="distance" id="liveDistance" data-target="mairie">${fmtDistance(distanceTo('mairie'))}</div>
     <div class="small center">Rayon de déverrouillage : ${l.radius} m</div>
@@ -195,6 +298,7 @@ function renderMairie(){
     ${chapterBadge('Chapitre I','Le Premier Veilleur')}
     <h2>La première direction</h2>
     <p class="quote">Cherchez la maison où le temps est gravé dans la pierre.</p>
+    ${illustrationBlock('stone','Le clocher et la pierre','Le premier sceau sommeille là où le temps a été gravé.')}
     <p class="story">Là où résonnent les cloches, la mémoire du village dort encore dans la matière. Le premier sceau n’est pas caché : il attend d’être reconnu.</p>
     ${loreBlock('Ce que murmure le Livre', 'La première marque est liée à la pierre. Elle ne se révèle qu’à ceux qui savent observer avant de déchiffrer.')}
     ${btn('Partir vers la Pierre', 'toChurch')}
@@ -217,30 +321,41 @@ function renderGateEglise(){
 }
 
 function renderEglise(){
-  state.screen='eglise'; saveState(); bell();
+  state.screen='eglise'; saveState(); bell(); omen('LA PIERRE S’ÉVEILLE','Épreuve I');
   app.innerHTML = card(`
     ${chapterBadge('Épreuve I','La Pierre du Temps')}
     <h2>Le temps est gravé</h2>
     ${progressHtml(1)}
+    ${illustrationBlock('stone','Lecture de la pierre','Observez, puis déchiffrez : la matière parle avant les lettres.')}
     <p class="quote">Les vivants regardent leur montre. Les anciens, eux, gravaient le temps dans la pierre.</p>
     <p><strong>Soline et Sacha :</strong> trouvez sur place l’année à quatre chiffres.</p>
     <input class="input" id="yearInput" inputmode="numeric" maxlength="4" placeholder="_ _ _ _" aria-label="Année gravée" />
     <button class="btn" id="yearCheck">Valider l’année</button>
     <div id="churchPart2" class="hidden">
       <div class="sep"></div>
-      <p><strong>Vadim :</strong> le Livre vous confie le déchiffrement. 1=A, 2=B, 3=C… Que signifie :</p>
-      <div class="center incantation">16 • 9 • 5 • 18 • 18 • 5</div>
-      <input class="input" id="cipherInput" placeholder="Mot" autocomplete="off"/>
-      <button class="btn" id="cipherCheck">Valider le mot</button>
+      <div class="teen-challenge">
+        <div class="teen-label">Épreuve des Cryptographes — Vadim & Louise</div>
+        <p>La date a réveillé l’alphabet des Veilleurs. Ici, les lettres ne commencent pas par A.</p>
+        <p class="quote">« Les morts comptent depuis la fin. La dernière lettre vaut 1. »</p>
+        <div class="cipher-strip">11 · 18 · 22 · 9 · 9 · 22</div>
+        <p class="small">Déchiffrez le mot de six lettres. Aucun tableau n’est fourni.</p>
+        <input class="input" id="cipherInput" placeholder="Mot de six lettres" autocomplete="off"/>
+        <button class="btn" id="cipherCheck">Soumettre le déchiffrement</button>
+      </div>
     </div>
     <div id="churchMsg"></div>
-    ${hintsHtml('eglise', ['Cherchez une date de construction inscrite sur l’édifice.', 'Pour le code de Vadim, remplacez chaque nombre par la lettre de même rang dans l’alphabet.'])}
+    ${hintsHtml('eglise', [
+      'Cherchez une date de construction inscrite sur l’édifice.',
+      'Pour les grands : si Z vaut 1, alors Y vaut 2, X vaut 3… Continuez à rebours jusqu’à transformer les six nombres.'
+    ])}
   `, 'chapter-card');
   $('#yearCheck').onclick = ()=>{
     if($('#yearInput').value.trim() === '1828'){
       successSound();
+      revealSound();
       $('#churchPart2').classList.remove('hidden');
-      $('#churchMsg').innerHTML = '<p class="success">✓ La pierre se souvient. Le déchiffrement peut commencer.</p>';
+      $('#churchPart2').classList.add('ink-reveal');
+      $('#churchMsg').innerHTML = '<p class="success">✓ 1828. La date ouvre un second mécanisme destiné aux plus grands.</p>';
     } else {
       failSound();
       $('#churchMsg').innerHTML = '<p class="error">Ce n’est pas l’année attendue.</p>';
@@ -251,10 +366,11 @@ function renderEglise(){
       state.fragments.sacha = '1';
       complete('eglise');
       successSound();
-      renderFragment('Sacha','1','🪨','Pierre', renderGateFontaine);
+      omen('PREMIÈRE MARQUE','La pierre vous reconnaît');
+      setTimeout(()=>renderFragment('Sacha','1','🪨','Pierre', renderGateFontaine),550);
     } else {
       failSound();
-      $('#churchMsg').innerHTML = '<p class="error">Le mot ne correspond pas au code.</p>';
+      $('#churchMsg').innerHTML = '<p class="error">Le Livre reste fermé. Relisez la phrase : la dernière lettre de l’alphabet vaut 1.</p>';
     }
   };
   bindHints(renderEglise);
@@ -262,17 +378,20 @@ function renderEglise(){
 
 function renderFragment(who, digit, icon, name, next){
   state.screen='fragment'; saveState();
+  haptic([50,70,140]);
+  sealRecoveredSound();
+  omen(`MARQUE DE LA ${name.toUpperCase()}`,'Le Livre vous confie un nouveau fragment');
   app.innerHTML = card(`
     ${chapterBadge('Fragment retrouvé', `Marque de la ${name}`)}
-    <div class="fragment-emblem">${icon}</div>
+    ${sealBurstHtml(icon)}
     <h2 class="center">La Marque de la ${name}</h2>
     <p class="quote">Passez le téléphone à <strong>${who}</strong>. Les autres détournent les yeux.</p>
     <div class="sep"></div>
     <p class="center">Le Livre confie à ${who} ce fragment secret :</p>
-    <div class="distance">${digit}</div>
+    <div class="distance fragment-digit">${digit}</div>
     <p class="small center">Mémorise-le. Il sera indispensable devant la chapelle.</p>
     ${btn('Je l’ai mémorisé', 'memorized')}
-  `, 'chapter-card fragment-card');
+  `, 'chapter-card fragment-card seal-recovered');
   $('#memorized').onclick = next;
 }
 
@@ -294,11 +413,12 @@ function renderGateFontaine(){
 }
 
 function renderFontaine(){
-  state.screen='fontaine'; saveState();
+  state.screen='fontaine'; saveState(); omen('LE GARDIEN DES EAUX','Épreuve II');
   app.innerHTML = card(`
     ${chapterBadge('Épreuve II','Le Gardien des Eaux')}
     <h2>Le reflet de la seconde marque</h2>
     ${progressHtml(2)}
+    ${illustrationBlock('water','Le Gardien des eaux','Un regard sculpté, une date gravée, puis un mot à extraire.')}
     <p class="quote">Ne touchez pas l’eau. Le deuxième Veilleur n’était pas humain.</p>
     <p><strong>Sacha :</strong> trouve l’arme portée par la créature.</p>
     <div class="choice-grid" id="weaponChoices">
@@ -308,23 +428,39 @@ function renderFontaine(){
       <button class="choice" data-v="arc">🏹 Arc</button>
     </div>
     <div id="fountainDate" class="hidden">
-      <p><strong>Soline :</strong> trouve les quatre chiffres gravés au-dessus de lui.</p>
+      <p><strong>Soline :</strong> trouve les quatre chiffres gravés au-dessus du Gardien.</p>
       <input class="input" id="fountainYear" inputmode="numeric" maxlength="4" placeholder="_ _ _ _">
-      <button class="btn" id="fountainYearBtn">Valider</button>
+      <button class="btn" id="fountainYearBtn">Valider l’année</button>
     </div>
     <div id="fountainFinal" class="hidden">
-      <p><strong>Louise et Vadim :</strong> quel chiffre commence <em>et</em> termine cette année ?</p>
-      <input class="input" id="fountainDigit" inputmode="numeric" maxlength="1">
-      <button class="btn" id="fountainDigitBtn">Valider</button>
+      <div class="teen-challenge">
+        <div class="teen-label">Épreuve des Cryptographes — Vadim & Louise</div>
+        <p>Le Livre inscrit quatre lignes. <strong>L’année n’est plus une réponse : elle devient le chemin.</strong></p>
+        <div class="rune-lines" aria-label="Quatre lignes de lettres">
+          <div><span>I</span><code>ECLATBRUME</code></div>
+          <div><span>II</span><code>OMBRESEAUX</code></div>
+          <div><span>III</span><code>BRUMEUROCHE</code></div>
+          <div><span>IV</span><code>XENONPIERRE</code></div>
+        </div>
+        <p class="quote">Un chiffre de 1861 pour chaque ligne. Comptez les lettres depuis la gauche.</p>
+        <p class="small">Les quatre lettres obtenues forment un mot.</p>
+        <input class="input" id="fountainWord" maxlength="4" placeholder="_ _ _ _" autocomplete="off">
+        <button class="btn" id="fountainWordBtn">Prononcer le mot</button>
+      </div>
     </div>
     <div id="fountainMsg"></div>
-    ${hintsHtml('fontaine', ['Observez le décor sculpté de la fontaine.', 'L’année attendue est 1861 ; regardez son premier et son dernier chiffre.'])}
+    ${hintsHtml('fontaine', [
+      'Commencez par observer le décor sculpté puis la date gravée.',
+      'Pour les grands : prenez la 1re lettre de la ligne I, la 8e de la II, la 6e de la III et la 1re de la IV.'
+    ])}
   `, 'chapter-card');
   $$('#weaponChoices .choice').forEach(b => b.onclick = ()=>{
     if(b.dataset.v === 'trident'){
       successSound();
+      revealSound();
       $('#fountainDate').classList.remove('hidden');
-      $('#fountainMsg').innerHTML = '<p class="success">✓ Le Gardien vous reconnaît. Cherchez maintenant son année.</p>';
+      $('#fountainDate').classList.add('ink-reveal');
+      $('#fountainMsg').innerHTML = '<p class="success">✓ Le trident a réveillé le Gardien. Cherchez maintenant son année.</p>';
     } else {
       failSound();
       $('#fountainMsg').innerHTML = '<p class="error">Cette arme n’est pas la sienne.</p>';
@@ -333,22 +469,25 @@ function renderFontaine(){
   $('#fountainYearBtn').onclick = ()=>{
     if($('#fountainYear').value.trim() === '1861'){
       successSound();
+      revealSound();
       $('#fountainFinal').classList.remove('hidden');
-      $('#fountainMsg').innerHTML = '<p class="success">✓ 1861. Les eaux laissent entrevoir un second signe.</p>';
+      $('#fountainFinal').classList.add('ink-reveal');
+      $('#fountainMsg').innerHTML = '<p class="success">✓ 1861. L’année se transforme en clé de lecture.</p>';
     } else {
       failSound();
       $('#fountainMsg').innerHTML = '<p class="error">Cherchez encore les quatre chiffres gravés.</p>';
     }
   };
-  $('#fountainDigitBtn').onclick = ()=>{
-    if($('#fountainDigit').value.trim() === '1'){
+  $('#fountainWordBtn').onclick = ()=>{
+    if($('#fountainWord').value.trim().toUpperCase() === 'EAUX'){
       state.fragments.soline = '2';
       complete('fontaine');
       successSound();
-      renderFragment('Soline','2','💧','Eau', renderWalkIntro);
+      omen('DEUXIÈME MARQUE','Les eaux livrent leur secret');
+      setTimeout(()=>renderFragment('Soline','2','💧','Eau', renderWalkIntro),550);
     } else {
       failSound();
-      $('#fountainMsg').innerHTML = '<p class="error">Regardez le début et la fin de 1861.</p>';
+      $('#fountainMsg').innerHTML = '<p class="error">Les quatre lettres ne sont pas encore les bonnes. Utilisez chaque chiffre de 1861 une seule fois, dans l’ordre.</p>';
     }
   };
   bindHints(renderFontaine);
@@ -360,6 +499,7 @@ function renderWalkIntro(){
     ${chapterBadge('Chapitre II','La Marche de Layer')}
     <h2>La Porte des Ombres</h2>
     <p class="quote">Vous quittez maintenant le domaine des vivants.</p>
+    ${illustrationBlock('walk','La route de Layer','La marche elle-même devient une épreuve, sous le regard de l’Ombre.')}
     <p class="story">Les deux premières marques ont été retrouvées. Mais le Livre devient plus sombre : au-delà du village, la route vers Layer n’est plus un simple chemin. C’est l’épreuve même des Veilleurs.</p>
     ${loreBlock('Ce qui vous attend', 'La distance jusqu’à la chapelle sera votre seul repère. À mesure que vous approcherez, l’Ombre vous éprouvera et révélera deux nouveaux fragments.')}
     ${destinationBlock('Destination', 'Hameau de Layer-sur-Roche — vers la chapelle Sainte-Madeleine', 'Suivez l’itinéraire pédestre reconnu à l’avance. Le téléphone indique la distance restante, pas le chemin à emprunter.')}
@@ -387,6 +527,7 @@ function renderWalk(){
     ${chapterBadge('Chapitre II','La Marche des Ombres')}
     <h2>Ne vous séparez jamais</h2>
     ${destinationBlock('Cap à tenir', 'Chapelle Sainte-Madeleine — Layer-sur-Roche', 'L’adulte guide le chemin ; le radar mesure seulement votre approche de la chapelle.')}
+    ${illustrationBlock('walk','Sous la lune de Layer','Chaque pas rapproche le groupe du dernier sceau.')}
     <div id="geoStatus">${geoStatusHtml()}</div>
     <div class="radar"></div>
     <div class="distance" id="walkDistance">${fmtDistance(w.d)}</div>
@@ -411,7 +552,7 @@ function updateWalk(){
 }
 
 function showShadow1(){
-  haptic([100,80,100]); footsteps();
+  haptic([100,80,100]); footsteps(); omen('OMBRE I','Quelque chose marche avec vous');
   const e = $('#walkEvent'); if(!e) return;
   e.innerHTML = `<div class="sep"></div><h3>OMBRE I</h3><p class="quote">Je grandis lorsque la lumière meurt. Je disparais dans l’obscurité complète. Qui suis-je ?</p><div class="choice-grid"><button class="choice" data-a="ombre">Une ombre</button><button class="choice" data-a="fantome">Un fantôme</button><button class="choice" data-a="brouillard">Du brouillard</button><button class="choice" data-a="corbeau">Un corbeau</button></div><div id="shadow1msg"></div>`;
   $$('#walkEvent .choice').forEach(b => b.onclick = ()=>{
@@ -427,40 +568,85 @@ function showShadow1(){
 }
 
 function showMemoryPattern(){
-  haptic();
+  haptic(); omen('OMBRE II','Le Porte-Flamme doit se souvenir');
   const e = $('#walkEvent'); if(!e) return;
-  e.innerHTML = `<div class="sep"></div><h3>OMBRE II — LE PORTE-FLAMME</h3><p>Passez le téléphone à <strong>Sacha</strong>. Les autres détournent les yeux.</p><p>Tu as 5 secondes pour mémoriser ce signe :</p><div class="memory-seq">${state.memoryPattern.join(' ')}</div><div class="small center" id="countdown">5</div>`;
+  e.innerHTML = `<div class="sep"></div><h3>OMBRE II — LE PORTE-FLAMME</h3><p>Passez le téléphone à <strong>Sacha</strong>. Les autres détournent les yeux.</p><p>Tu as 5 secondes pour mémoriser cette suite. <strong>Ne la récite pas tout de suite.</strong></p><div class="memory-seq memory-glow">${state.memoryPattern.join(' ')}</div><div class="small center" id="countdown">5</div>`;
   let n = 5;
   const id = setInterval(()=>{
     n--;
     const c = $('#countdown'); if(c) c.textContent = n;
-    if(n <= 0){ clearInterval(id); e.innerHTML = '<div class="hint-box">Sacha, garde la séquence en mémoire. Le chemin te la redemandera.</div>'; }
+    if(n <= 0){
+      clearInterval(id);
+      e.innerHTML = '<div class="hint-box">Sacha, garde l’ordre en mémoire. Bientôt, Vadim aura une grille que lui seul ne pourra pas résoudre.</div>';
+    }
   }, 1000);
 }
 
 function showMemoryTest(){
-  haptic();
+  haptic(); omen('OMBRE II','Le Cryptographe reçoit la grille');
   const e = $('#walkEvent'); if(!e) return;
-  e.innerHTML = `<div class="sep"></div><h3>OMBRE II — LE CRYPTOGRAPHE</h3><p>Passez le téléphone à <strong>Vadim</strong>. Demande à Sacha ce qu’il a vu.</p><p>Choisis la bonne séquence :</p><div class="choice-grid"><button class="choice" data-ok="1">🌙 🐦‍⬛ 🔥 ☠️</button><button class="choice">🐦‍⬛ 🌙 ☠️ 🔥</button><button class="choice">🔥 ☠️ 🌙 🐦‍⬛</button><button class="choice">🌙 🔥 🐦‍⬛ ☠️</button></div><div id="memmsg"></div>`;
-  $$('#walkEvent .choice').forEach(b => b.onclick = ()=>{
-    if(b.dataset.ok){
+  e.innerHTML = `<div class="sep"></div><h3>OMBRE II — LE CRYPTOGRAPHE</h3>
+    <p>Passez le téléphone à <strong>Vadim</strong>. Demande maintenant à Sacha de réciter les quatre symboles dans l’ordre.</p>
+    <div class="teen-challenge">
+      <div class="teen-label">Grille des quatre signes</div>
+      <p class="quote">Le 1er souvenir choisit une colonne sur la ligne I, le 2e sur la ligne II, le 3e sur III, le 4e sur IV.</p>
+      <div class="rune-grid-wrap">
+        <table class="rune-grid">
+          <thead><tr><th></th><th>🔥</th><th>☠️</th><th>🌙</th><th>🐦‍⬛</th></tr></thead>
+          <tbody>
+            <tr><th>I</th><td>A</td><td>R</td><td>N</td><td>M</td></tr>
+            <tr><th>II</th><td>L</td><td>O</td><td>S</td><td>E</td></tr>
+            <tr><th>III</th><td>U</td><td>T</td><td>C</td><td>H</td></tr>
+            <tr><th>IV</th><td>P</td><td>F</td><td>V</td><td>I</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="small">Les quatre lettres obtenues forment un nombre écrit en toutes lettres.</p>
+      <input class="input" id="memoryWord" maxlength="4" placeholder="Mot" autocomplete="off">
+      <button class="btn" id="memoryWordBtn">Valider le déchiffrement</button>
+    </div>
+    <div id="memmsg"></div>`;
+  $('#memoryWordBtn').onclick = ()=>{
+    if($('#memoryWord').value.trim().toUpperCase() === 'NEUF'){
       state.walk.memoryDone = true;
       state.fragments.vadim = '9';
       saveState();
       successSound();
-      renderFragment('Vadim','9','ᚱ','Mémoire', renderWalk);
+      omen('TROISIÈME FRAGMENT','Le nombre neuf est révélé');
+      setTimeout(()=>renderFragment('Vadim','9','ᚱ','Mémoire', renderWalk),550);
     } else {
       failSound();
-      $('#memmsg').innerHTML = '<p class="error">Demandez à Sacha de se rappeler l’ordre exact.</p>';
+      $('#memmsg').innerHTML = '<p class="error">La grille ne donne pas ce mot. Vérifiez surtout l’ordre exact mémorisé par Sacha.</p>';
     }
-  });
+  };
 }
 
 function showShadow3(){
-  haptic([100,70,100]);
+  haptic([100,70,100]); omen('OMBRE III','La Gardienne doit juger le vrai du faux');
   const e = $('#walkEvent'); if(!e) return;
-  e.innerHTML = `<div class="sep"></div><h3>OMBRE III — LA GARDIENNE</h3><p>Passez le téléphone à <strong>Louise</strong>.</p><p class="quote">Ce que tu cherches n’est pas enterré. Ce n’est pas dans la chapelle. Lorsque les quatre chiffres seront réunis, c’est toi qui devras les mettre dans l’ordre.</p><button class="btn" id="louiseReveal">Révéler mon fragment</button>`;
-  $('#louiseReveal').onclick = ()=>{ state.fragments.louise='2'; saveState(); renderFragment('Louise','2','🗝','Gardienne', renderWalk); };
+  e.innerHTML = `<div class="sep"></div><h3>OMBRE III — LA GARDIENNE</h3>
+    <p>Passez le téléphone à <strong>Louise</strong>.</p>
+    <p class="quote">Quatre pierres parlent. Une seule dit la vérité. Les trois autres mentent.</p>
+    <div class="logic-stones">
+      <div><b>I</b><span>« Le fragment est un nombre pair. »</span></div>
+      <div><b>II</b><span>« Le fragment est supérieur à 2. »</span></div>
+      <div><b>III</b><span>« Le fragment n’est pas 2. »</span></div>
+      <div><b>IV</b><span>« Le fragment est 1 ou 4. »</span></div>
+    </div>
+    <p class="small">Le fragment est compris entre 1 et 4. Quel nombre rend <strong>une seule</strong> inscription vraie ?</p>
+    <input class="input" id="louiseLogic" inputmode="numeric" maxlength="1" placeholder="?">
+    <button class="btn" id="louiseReveal">Sceller mon choix</button>
+    <div id="louiseMsg"></div>`;
+  $('#louiseReveal').onclick = ()=>{
+    if($('#louiseLogic').value.trim() === '2'){
+      state.fragments.louise='2'; saveState(); successSound();
+      omen('QUATRIÈME FRAGMENT','La Gardienne a démasqué les mensonges');
+      setTimeout(()=>renderFragment('Louise','2','🗝','Gardienne', renderWalk),550);
+    } else {
+      failSound();
+      $('#louiseMsg').innerHTML='<p class="error">Avec ce nombre, il n’y a pas exactement une seule inscription vraie. Teste les quatre possibilités une par une.</p>';
+    }
+  };
 }
 
 function renderGateChapelle(){
@@ -469,6 +655,7 @@ function renderGateChapelle(){
     ${chapterBadge('Approche finale','La Maison de Pierre')}
     <h2>Le dernier seuil</h2>
     <p class="quote">Cherchez la maison de pierre qui n’est ni une maison, ni une église de village. Elle porte le nom d’une femme.</p>
+    ${illustrationBlock('chapel','La maison de pierre','La chapelle garde la dernière énigme et l’ordre du rituel.')}
     <p class="story">Le Livre s’approche de sa dernière page. Dès que vous serez devant la bonne pierre, le sceau tentera une dernière résistance.</p>
     ${destinationBlock('Repère du Livre', 'Chapelle Sainte-Madeleine — Layer-sur-Roche', 'Rejoignez la chapelle. La finale se déclenchera automatiquement dans le rayon configuré.')}
     <div id="geoStatus">${geoStatusHtml()}</div>
@@ -479,40 +666,87 @@ function renderGateChapelle(){
 }
 
 function renderFinale(){
-  state.screen='finale'; saveState(); haptic([180,90,180]);
+  state.screen='finale'; saveState(); haptic([180,90,180]); omen('LE SCEAU DE LAYER','Dernière épreuve');
   app.innerHTML = `<div class="blackout">${card(`
     ${chapterBadge('Sainte-Madeleine','Le Sceau de Layer')}
+    ${illustrationBlock('chapel','Le Sceau de Layer','La pierre ne cède qu’aux Veilleurs qui rétablissent l’ordre du rituel.')}
+    <div class="seal-ring"><span>✦</span></div>
     <h2 id="lateText">TROP TARD.</h2>
     <div id="finalBody" class="hidden">
       <p class="quote">… sauf si vous êtes toujours quatre.</p>
-      <p class="story">Chaque Veilleur possède une part du sceau. Réunissez vos fragments dans l’ordre des emblèmes. Si le nombre est juste, la pierre se refermera.</p>
-      <div class="symbols"><div class="sigil"><span>🔥</span></div><div class="sigil"><span>👁</span></div><div class="sigil"><span>ᚱ</span></div><div class="sigil"><span>🗝</span></div></div>
-      <input class="input" id="sealCode" inputmode="numeric" maxlength="4" placeholder="_ _ _ _">
-      <button class="btn" id="sealBtn">Refermer le sceau</button>
-      <div id="finalMsg"></div>
+      <p class="story">Vos quatre fragments sont justes, mais le sceau refuse qu’on les récite au hasard. Les Veilleurs doivent d’abord retrouver <strong>l’ordre du rituel</strong>.</p>
+      <div class="teen-challenge final-logic">
+        <div class="teen-label">Dernière énigme — à résoudre ensemble</div>
+        <div class="final-clues">
+          <p>① L’Œil n’est ni le premier, ni le dernier.</p>
+          <p>② La Clé vient après la Rune.</p>
+          <p>③ Un seul emblème sépare la Flamme de la Rune.</p>
+          <p>④ L’Œil suit immédiatement la Flamme.</p>
+        </div>
+        <p class="small">Touchez les quatre emblèmes dans l’ordre que vous déduisez.</p>
+        <div class="symbol-picks" id="symbolPicks">
+          <button type="button" data-sym="F" data-icon="🔥">🔥</button>
+          <button type="button" data-sym="E" data-icon="👁">👁</button>
+          <button type="button" data-sym="R" data-icon="ᚱ">ᚱ</button>
+          <button type="button" data-sym="K" data-icon="🗝">🗝</button>
+        </div>
+        <div class="order-slots" id="orderSlots"><span>?</span><span>?</span><span>?</span><span>?</span></div>
+        <button type="button" class="btn secondary" id="orderReset">Effacer l’ordre</button>
+        <div id="orderMsg"></div>
+      </div>
+      <div id="sealEntry" class="hidden">
+        <div class="sep"></div>
+        <p class="story">L’ordre est retrouvé. Appelez maintenant chaque Veilleur dans cet ordre et réunissez leurs fragments.</p>
+        <input class="input" id="sealCode" inputmode="numeric" maxlength="4" placeholder="_ _ _ _">
+        <button class="btn" id="sealBtn">Refermer le sceau</button>
+        <div id="finalMsg"></div>
+      </div>
     </div>
   `, 'chapter-card final-card')}</div>`;
   setTimeout(()=>{ const b=$('#finalBody'); if(b) b.classList.remove('hidden'); }, 2500);
-  setTimeout(()=>tone(58,.35,'sine',.035),600);
+  setTimeout(()=>tone(58,.55,'sine',.028),600);
   setTimeout(()=>{
-    const btnEl = $('#sealBtn');
-    if(btnEl) btnEl.onclick = ()=>{
-      if($('#sealCode').value.trim() === '1292'){
-        successSound();
-        complete('finale');
-        renderTreasure();
+    let order=[];
+    const slots=()=>$$('#orderSlots span');
+    function drawOrder(){
+      slots().forEach((s,i)=>s.textContent=order[i]?.icon || '?');
+      $$('#symbolPicks button').forEach(b=>{ b.disabled=order.some(x=>x.sym===b.dataset.sym); });
+    }
+    $$('#symbolPicks button').forEach(b=>b.onclick=()=>{
+      if(order.length>=4 || order.some(x=>x.sym===b.dataset.sym)) return;
+      order.push({sym:b.dataset.sym,icon:b.dataset.icon}); drawOrder(); tone(120+order.length*45,.08,'sine',.018);
+      if(order.length===4){
+        const key=order.map(x=>x.sym).join('');
+        if(key==='FERK'){
+          successSound();
+          revealSound();
+          $('#orderMsg').innerHTML='<p class="success">✓ L’ordre du rituel est retrouvé : Flamme → Œil → Rune → Clé.</p>';
+          $('#sealEntry').classList.remove('hidden'); $('#sealEntry').classList.add('ink-reveal');
+          $('#symbolPicks').classList.add('solved');
+        } else {
+          failSound();
+          $('#orderMsg').innerHTML='<p class="error">Le cercle ne répond pas. Au moins une des quatre règles est violée.</p>';
+        }
+      }
+    });
+    $('#orderReset').onclick=()=>{ order=[]; drawOrder(); $('#orderMsg').innerHTML=''; $('#sealEntry').classList.add('hidden'); $('#symbolPicks').classList.remove('solved'); };
+    $('#sealBtn').onclick=()=>{
+      if($('#sealCode').value.trim()==='1292'){
+        sealRecoveredSound(); successSound(); complete('finale'); omen('LE SCEAU SE REFERME','Les quatre Veilleurs ont réussi');
+        document.body.classList.add('seal-closed');
+        setTimeout(()=>{document.body.classList.remove('seal-closed');renderTreasure();},900);
       } else {
-        failSound();
-        $('#finalMsg').innerHTML = '<p class="error">Le sceau refuse cet ordre. Faites parler les quatre Veilleurs.</p>';
+        failSound(); $('#finalMsg').innerHTML='<p class="error">Les fragments sont bons, mais pas dans cet ordre. Faites parler les quatre Veilleurs selon le rituel que vous venez de retrouver.</p>';
       }
     };
-  }, 2600);
+  },2600);
 }
 
 function renderTreasure(){
   state.screen='treasure'; saveState();
   app.innerHTML = card(`
     ${chapterBadge('Le sceau est refermé','Le Livre se souvient')}
+    ${illustrationBlock('treasure','Le trésor des Veilleurs','La pierre est close, mais une récompense demeure au-delà du sceau.')}
     <h1 class="year-mark">1292</h1>
     <p class="story">Les quatre fragments ont reformé l’année liée à la fondation de la chapelle dans la légende du jeu. La pierre reconnaît à nouveau le serment des Veilleurs.</p>
     <div class="sep"></div>
@@ -540,6 +774,107 @@ function renderDone(){
       `, 'hero-card')}
     </div>`;
   $('#treasureAgain').onclick = renderTreasure;
+}
+
+
+// ---------- Mode test local ----------
+function setSimulatedDistance(distanceMeters, tick=true){
+  const target=targetPoint('chapelle'); if(!target) return;
+  currentPosition={lat:target.lat+(Number(distanceMeters)/111320),lon:target.lon,accuracy:3,t:Date.now()};
+  simulatedPosition=true;
+  if(tick) liveTick();
+}
+function simulatePositionAt(key){
+  const target=targetPoint(key);
+  if(!target){ if(key==='fontaine'){ renderFontaine(); } return; }
+  currentPosition={lat:target.lat,lon:target.lon,accuracy:3,t:Date.now()};
+  simulatedPosition=true; liveTick();
+}
+function resetWalkTestFlags(){
+  state.walk={shadow1:false,memoryShown:false,memoryDone:false,shadow3:false};
+  delete state.fragments.vadim; delete state.fragments.louise; saveState();
+}
+function prepareWalkTest(){
+  setSimulatedDistance(3000,false);
+  state.screen='walk'; saveState();
+  renderWalk();
+}
+function testShowWalkEvent(kind){
+  prepareWalkTest();
+  const e=$('#walkEvent'); if(e) e.innerHTML='';
+  if(kind==='shadow1'){
+    state.walk.shadow1=true; saveState(); showShadow1();
+  }else if(kind==='memoryShow'){
+    state.walk.shadow1=true; state.walk.memoryShown=true; saveState(); showMemoryPattern();
+  }else if(kind==='memoryTest'){
+    state.walk.shadow1=true; state.walk.memoryShown=true; state.walk.memoryDone=false; saveState(); showMemoryTest();
+  }else if(kind==='shadow3'){
+    state.walk.shadow1=true; state.walk.memoryShown=true; state.walk.memoryDone=true; state.walk.shadow3=true; saveState(); showShadow3();
+  }else if(kind==='approach'){
+    state.walk={shadow1:true,memoryShown:true,memoryDone:true,shadow3:true}; saveState();
+    setSimulatedDistance(250,true);
+  }
+}
+function testAdvanceCurrent(){
+  switch(state.screen){
+    case 'gate-mairie': simulatePositionAt('mairie'); break;
+    case 'gate-eglise': simulatePositionAt('eglise'); break;
+    case 'gate-fontaine': simulatePositionAt('fontaine'); break;
+    case 'walk': {
+      if(!state.walk.shadow1) testShowWalkEvent('shadow1');
+      else if(!state.walk.memoryShown) testShowWalkEvent('memoryShow');
+      else if(!state.walk.memoryDone) testShowWalkEvent('memoryTest');
+      else if(!state.walk.shadow3) testShowWalkEvent('shadow3');
+      else testShowWalkEvent('approach');
+      break;
+    }
+    case 'gate-chapelle': simulatePositionAt('chapelle'); break;
+    default: document.querySelector('.local-test-panel')?.classList.add('open'); break;
+  }
+}
+function testGo(route){
+  if(route==='walk'){ prepareWalkTest(); return; }
+  const routes={home:renderHome,prologue:renderPrologue,'gate-mairie':renderGateMairie,mairie:renderMairie,'gate-eglise':renderGateEglise,eglise:renderEglise,'gate-fontaine':renderGateFontaine,fontaine:renderFontaine,'walk-intro':renderWalkIntro,'gate-chapelle':renderGateChapelle,finale:renderFinale,treasure:renderTreasure,done:renderDone};
+  routes[route]?.();
+}
+function initLocalTestToolbar(){
+  if(!LOCAL_TEST || document.querySelector('.local-test-dock')) return;
+  const dock=document.createElement('div'); dock.className='local-test-dock';
+  dock.innerHTML=`
+    <button type="button" class="local-test-toggle" title="Outils de test local">🧪 <span>TEST LOCAL</span></button>
+    <div class="local-test-panel">
+      <div class="local-test-title">Simulation locale</div>
+      <p>Les événements de la Marche peuvent maintenant être ouverts directement, sans dépendre des étapes précédentes.</p>
+      <button type="button" class="local-test-main" id="localAdvance">▶ Arrivée / événement suivant</button>
+      <label for="localStage">Aller directement à :</label>
+      <select id="localStage">
+        <option value="home">Accueil</option><option value="prologue">Prologue</option>
+        <option value="gate-mairie">GPS — Mairie</option><option value="mairie">Mairie — indice</option>
+        <option value="gate-eglise">GPS — Église</option><option value="eglise">Énigme — Église</option>
+        <option value="gate-fontaine">GPS — Fontaine</option><option value="fontaine">Énigme — Fontaine</option>
+        <option value="walk-intro">Intro — Marche</option><option value="walk">Marche — radar neutre</option>
+        <option value="gate-chapelle">GPS — Chapelle</option><option value="finale">Finale</option><option value="treasure">Trésor</option>
+      </select>
+      <button type="button" id="localGo">Afficher cette étape</button>
+      <div class="local-test-walk">
+        <span>Événements de la Marche</span>
+        <button data-walk-event="shadow1">Ombre I</button>
+        <button data-walk-event="memoryShow">Sacha</button>
+        <button data-walk-event="memoryTest">Vadim</button>
+        <button data-walk-event="shadow3">Louise</button>
+        <button data-walk-event="approach">Approche</button>
+        <button id="localWalkReset">↺ Marche</button>
+      </div>
+      <button type="button" id="localReset">Réinitialiser toute la partie</button>
+    </div>`;
+  document.body.appendChild(dock);
+  const panel=$('.local-test-panel',dock);
+  $('.local-test-toggle',dock).onclick=()=>panel.classList.toggle('open');
+  $('#localAdvance',dock).onclick=()=>{testAdvanceCurrent();panel.classList.remove('open');};
+  $('#localGo',dock).onclick=()=>{testGo($('#localStage',dock).value);panel.classList.remove('open');};
+  $('#localReset',dock).onclick=()=>{state=clone(DEFAULT_STATE);saveState();currentPosition=null;simulatedPosition=false;renderHome();panel.classList.remove('open');};
+  $('#localWalkReset',dock).onclick=()=>{resetWalkTestFlags();prepareWalkTest();panel.classList.remove('open');};
+  $$('[data-walk-event]',dock).forEach(b=>b.onclick=()=>{testShowWalkEvent(b.dataset.walkEvent);panel.classList.remove('open');});
 }
 
 // ---------- Mode maître du jeu ----------
@@ -616,5 +951,29 @@ function resume(){
   (routes[s] || renderHome)();
 }
 
-if('serviceWorker' in navigator){ window.addEventListener('load', ()=>navigator.serviceWorker.register('./sw.js').catch(()=>{})); }
+initAtmosphere();
+updateSoundButton();
+$('#soundButton')?.addEventListener('click', ()=>{
+  soundEnabled=!soundEnabled;
+  localStorage.setItem('veilleurs_sound', soundEnabled?'on':'off');
+  if(soundEnabled){ startAmbient(); tone(220,.12,'sine',.018); } else stopAmbient();
+  updateSoundButton();
+});
+document.addEventListener('pointerdown', ()=>{ if(soundEnabled) startAmbient(); }, {once:true});
+
+if('serviceWorker' in navigator){
+  window.addEventListener('load', async ()=>{
+    if(LOCAL_TEST){
+      try {
+        const regs = await navigator.serviceWorker.getRegistrations();
+        await Promise.all(regs.map(r => r.unregister()));
+        const keys = await caches.keys();
+        await Promise.all(keys.filter(k => k.startsWith('veilleurs-')).map(k => caches.delete(k)));
+      } catch {}
+      return;
+    }
+    navigator.serviceWorker.register('./sw.js').catch(()=>{});
+  });
+}
 resume();
+initLocalTestToolbar();

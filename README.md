@@ -6,7 +6,7 @@ Jeu géolocalisé et immersif pour Vadim (12 ans), Louise (14 ans), Soline (9 an
 
 - `index.html` : page principale
 - `styles.css` : habillage immersif responsive
-- `app.js` : jeu, GPS, énigmes, sauvegarde et mode maître du jeu
+- `app.js` : jeu, GPS, énigmes, animations, ambiance sonore, sauvegarde et mode maître du jeu
 - `manifest.json` + `sw.js` : fonctionnement PWA / hors connexion après premier chargement
 
 ## Mise en ligne
@@ -14,6 +14,39 @@ Jeu géolocalisé et immersif pour Vadim (12 ans), Louise (14 ans), Soline (9 an
 La géolocalisation des navigateurs exige **HTTPS** (ou `localhost` pour tester sur ordinateur). Le site peut être publié tel quel sur GitHub Pages, Netlify, Cloudflare Pages, Vercel ou tout hébergeur HTTPS statique.
 
 Il n’utilise aucune bibliothèque externe et n’envoie aucune position vers un serveur.
+
+### Ambiance
+
+Le bouton **🔊** en bas à droite active ou coupe l’ambiance sonore générée par le navigateur. Le site ajoute également des transitions de chapitres, apparitions de sceaux, runes flottantes, effets de réussite/erreur et animations spécifiques à la finale.
+
+
+## Test local sur PC (sans publication)
+
+Le dossier contient **`TEST-LOCAL.bat`**. Sous Windows :
+
+1. décompressez le dossier ;
+2. double-cliquez sur `TEST-LOCAL.bat` ;
+3. le navigateur s’ouvre automatiquement sur `http://localhost:8080/?test=1` ;
+4. gardez la fenêtre noire ouverte pendant le test ;
+5. faites `Ctrl+C` dans cette fenêtre pour arrêter le serveur.
+
+Python 3 doit être installé sur le PC. Le script accepte aussi un autre port : par exemple `TEST-LOCAL.bat 9000`.
+
+### Barre de simulation 🧪
+
+Lorsque l’adresse contient `?test=1`, une barre **TEST LOCAL** apparaît en bas à gauche. Elle permet :
+
+- d’aller directement à n’importe quelle étape ;
+- de simuler l’arrivée à la mairie, à l’église, à la fontaine et à la chapelle ;
+- d’ouvrir directement chacune des épreuves de la Marche des Ombres : **Ombre I**, **mémoire de Sacha**, **grille de Vadim**, **logique de Louise** et **approche de la chapelle** ;
+- de remettre uniquement la Marche à zéro, sans recommencer tout le jeu ;
+- de réinitialiser toute la progression locale.
+
+Les boutons de la Marche sont indépendants de l’état précédent : vous pouvez tester directement Vadim ou Louise sans avoir joué les événements précédents.
+
+Le mode test ne demande pas la position réelle du PC. Il désactive également le service worker et vide son cache, afin qu’un simple rafraîchissement affiche toujours les dernières modifications des fichiers.
+
+Pour tester le comportement normal du site sur `localhost` avec la vraie géolocalisation du navigateur, ouvrez simplement `http://localhost:8080/` **sans** `?test=1`.
 
 ## Mode maître du jeu
 
