@@ -100,3 +100,9 @@ Ces seuils sont dans `app.js`, objet `DEFAULT_CONFIG.walkThresholds`, et sont é
 ## Test avant le jour J
 
 Faire une répétition adulte complète sur l’itinéraire réel, vérifier la sécurité du chemin vers Layer-sur-Roche et tester les quatre déclenchements géographiques avec le téléphone qui sera utilisé le jour J.
+
+## Mode décompte avant l'aventure
+
+La version actuelle active par défaut un verrou jusqu'au **31 octobre 2026 à 15:45** (heure locale du téléphone). Avant ce moment, les participants peuvent consulter l'univers et le compte à rebours, mais le bouton de lancement de l'aventure n'est pas disponible.
+
+Pour modifier ce réglage : ouvrir ⚙, entrer le PIN maître du jeu, puis utiliser **Activer le décompte avant l’aventure** et **Date et heure d’ouverture**. Le mode `?test=1` ignore volontairement le verrou afin de permettre les répétitions locales.

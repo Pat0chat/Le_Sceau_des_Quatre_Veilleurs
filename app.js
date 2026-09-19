@@ -1,16 +1,18 @@
 'use strict';
 
 const DEFAULT_CONFIG = {
-  version: 4,
+  version: 5,
   gmPin: '4826',
   treasureCode: '3147',
+  countdownEnabled: true,
+  unlockAt: '2026-10-31T15:45',
   locations: {
     mairie: { name: 'Mairie de Bissey-la-Côte', lat: 47.9128, lon: 4.71207, radius: 55, calibrated: false },
     eglise: { name: 'Église de la Nativité', lat: 47.91326, lon: 4.70868, radius: 55, calibrated: false },
     fontaine: { name: "Fontaine-abreuvoir, rue de l'Abreuvoir", lat: null, lon: null, radius: 55, calibrated: false },
     chapelle: { name: 'Chapelle Sainte-Madeleine de Layer-sur-Roche', lat: 47.89236, lon: 4.68423, radius: 60, calibrated: false }
   },
-  walkThresholds: { shadow1: 2300, memoryShow: 1500, memoryTest: 1200, shadow3: 800, approach: 300 }
+  walkThresholds: { shadow1: 2300, observer: 1900, memoryShow: 1500, memoryTest: 1200, shadow3: 800, approach: 300 }
 };
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -18,6 +20,7 @@ const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const app = $('#app');
 const LOCAL_TEST = new URLSearchParams(window.location.search).get('test') === '1';
 let simulatedPosition = false;
+let activeWalkEvent = null;
 
 function clone(v){ return JSON.parse(JSON.stringify(v)); }
 function loadConfig(){
@@ -29,6 +32,8 @@ function mergeConfig(raw){
   if(raw && typeof raw === 'object'){
     if(raw.gmPin) base.gmPin = String(raw.gmPin);
     if(raw.treasureCode) base.treasureCode = String(raw.treasureCode);
+    if(typeof raw.countdownEnabled === 'boolean') base.countdownEnabled = raw.countdownEnabled;
+    if(raw.unlockAt) base.unlockAt = String(raw.unlockAt);
     if(raw.walkThresholds) Object.assign(base.walkThresholds, raw.walkThresholds);
     if(raw.locations){ for(const k of Object.keys(base.locations)){ if(raw.locations[k]) Object.assign(base.locations[k], raw.locations[k]); } }
   }
@@ -37,14 +42,48 @@ function mergeConfig(raw){
 let config = mergeConfig(loadConfig());
 function saveConfig(){ localStorage.setItem('veilleurs_config', JSON.stringify(config)); }
 
+let countdownTimer = null;
+function unlockDate(){
+  const d = new Date(config.unlockAt || '');
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+function adventureLocked(){
+  if(LOCAL_TEST || !config.countdownEnabled || state?.startedAt) return false;
+  const d=unlockDate();
+  return d ? Date.now() < d.getTime() : false;
+}
+function countdownParts(){
+  const d=unlockDate();
+  if(!d) return null;
+  const ms=Math.max(0,d.getTime()-Date.now());
+  const total=Math.floor(ms/1000);
+  return {days:Math.floor(total/86400),hours:Math.floor((total%86400)/3600),minutes:Math.floor((total%3600)/60),seconds:total%60};
+}
+function countdownHtml(){
+  const d=unlockDate(), p=countdownParts();
+  if(!d || !p) return '';
+  return `<div class="countdown-lock"><div class="countdown-seal">✦</div><div class="countdown-kicker">Le Livre est encore scellé</div><div class="countdown-date">Ouverture le ${d.toLocaleDateString('fr-FR',{weekday:'long',day:'numeric',month:'long',year:'numeric'})} à ${d.toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'})}</div><div class="countdown-grid"><div><strong id="cdDays">${p.days}</strong><span>jours</span></div><div><strong id="cdHours">${String(p.hours).padStart(2,'0')}</strong><span>heures</span></div><div><strong id="cdMinutes">${String(p.minutes).padStart(2,'0')}</strong><span>minutes</span></div><div><strong id="cdSeconds">${String(p.seconds).padStart(2,'0')}</strong><span>secondes</span></div></div><p>Le moment venu, le sceau se déverrouillera de lui-même.</p></div>`;
+}
+function startCountdownTicker(){
+  if(countdownTimer) clearInterval(countdownTimer);
+  if(!adventureLocked()) return;
+  countdownTimer=setInterval(()=>{
+    if(!adventureLocked()){ clearInterval(countdownTimer); countdownTimer=null; renderHome(); return; }
+    const p=countdownParts(); if(!p) return;
+    const vals=[['#cdDays',p.days],['#cdHours',String(p.hours).padStart(2,'0')],['#cdMinutes',String(p.minutes).padStart(2,'0')],['#cdSeconds',String(p.seconds).padStart(2,'0')]];
+    vals.forEach(([s,v])=>{const el=$(s); if(el) el.textContent=v;});
+  },1000);
+}
+
 const DEFAULT_STATE = {
   screen: 'home',
   completed: [],
   fragments: {},
   hints: {},
-  walk: { shadow1: false, memoryShown: false, memoryDone: false, shadow3: false },
+  walk: { shadow1: false, observerDone: false, memoryShown: false, memoryDone: false, shadow3: false },
   memoryPattern: ['🌙','🐦‍⬛','🔥','☠️'],
   finalStep: 0,
+  fearLevel: 0,
   startedAt: null
 };
 function loadState(){
@@ -54,7 +93,7 @@ function loadState(){
 let state = loadState();
 function saveState(){ localStorage.setItem('veilleurs_state', JSON.stringify(state)); }
 function complete(id){ if(!state.completed.includes(id)) state.completed.push(id); saveState(); }
-function resetGame(){ state = clone(DEFAULT_STATE); saveState(); renderHome(); }
+function resetGame(){ activeWalkEvent=null; state = clone(DEFAULT_STATE); saveState(); renderHome(); }
 
 let currentPosition = null;
 let geoWatchId = null;
@@ -62,6 +101,9 @@ let lastGeoError = null;
 let wakeLock = null;
 let audioCtx = null;
 let ambientNodes = [];
+let ambientTimer = null;
+let ambientStep = 0;
+let scareCooldown = false;
 let soundEnabled = localStorage.getItem('veilleurs_sound') !== 'off';
 
 function haptic(ms = 80){ try { navigator.vibrate?.(ms); } catch {} }
@@ -84,23 +126,74 @@ function tone(freq = 130, dur = .18, type = 'sine', vol = .035){
     o.stop(A.currentTime + dur);
   } catch {}
 }
+function ambientPadNote(freq, dur=4.8, vol=.018){
+  if(!soundEnabled) return;
+  try{
+    const A=getAudioCtx(); if(!A) return;
+    const o=A.createOscillator(), g=A.createGain(), f=A.createBiquadFilter(), d=A.createDelay(), fb=A.createGain(), wet=A.createGain();
+    o.type='sine'; o.frequency.value=freq;
+    f.type='lowpass'; f.frequency.value=1100;
+    g.gain.setValueAtTime(.0001,A.currentTime);
+    g.gain.exponentialRampToValueAtTime(vol,A.currentTime+.55);
+    g.gain.exponentialRampToValueAtTime(.0001,A.currentTime+dur);
+    d.delayTime.value=.34; fb.gain.value=.23; wet.gain.value=.32;
+    o.connect(f); f.connect(g); g.connect(A.destination); g.connect(d); d.connect(wet); wet.connect(A.destination); d.connect(fb); fb.connect(d);
+    o.start(); o.stop(A.currentTime+dur+.1);
+  }catch{}
+}
+function ambientMusicTick(){
+  if(!soundEnabled || !ambientNodes.length) return;
+  const chords=[
+    [146.83,174.61,220.00],
+    [130.81,164.81,196.00],
+    [110.00,146.83,174.61],
+    [123.47,146.83,185.00]
+  ];
+  const c=chords[ambientStep%chords.length];
+  c.forEach((n,i)=>setTimeout(()=>ambientPadNote(n,5.6,.014-(i*.002)),i*120));
+  const melody=[293.66,261.63,220.00,246.94,293.66,329.63,261.63,220.00];
+  const note=melody[ambientStep%melody.length];
+  setTimeout(()=>ambientPadNote(note,2.8,.009),900);
+  if(ambientStep%2===1) setTimeout(()=>ambientPadNote(note*2,2.2,.0045),1550);
+  ambientStep++;
+}
 function startAmbient(){
   if(!soundEnabled || ambientNodes.length) return;
   try {
     const A = getAudioCtx(); if(!A) return;
-    const master = A.createGain(); master.gain.value = .012;
-    const filter = A.createBiquadFilter(); filter.type = 'lowpass'; filter.frequency.value = 420;
+    const master = A.createGain(); master.gain.value = .045;
+    const filter = A.createBiquadFilter(); filter.type = 'lowpass'; filter.frequency.value = 1250;
     master.connect(filter); filter.connect(A.destination);
-    const o1=A.createOscillator(), o2=A.createOscillator(), lfo=A.createOscillator(), lfoGain=A.createGain();
-    o1.type='sine'; o1.frequency.value=55; o2.type='triangle'; o2.frequency.value=82.5;
-    lfo.frequency.value=.07; lfoGain.gain.value=.0035; lfo.connect(lfoGain); lfoGain.connect(master.gain);
-    o1.connect(master); o2.connect(master); o1.start(); o2.start(); lfo.start();
-    ambientNodes=[o1,o2,lfo,master,filter,lfoGain];
+
+    const bass=A.createOscillator(), fifth=A.createOscillator();
+    const bassGain=A.createGain(), fifthGain=A.createGain();
+    bass.type='sine'; bass.frequency.value=73.42; bassGain.gain.value=.32;
+    fifth.type='triangle'; fifth.frequency.value=110; fifthGain.gain.value=.09;
+    bass.connect(bassGain); fifth.connect(fifthGain); bassGain.connect(master); fifthGain.connect(master);
+
+    const noise=A.createBufferSource();
+    const noiseBuffer=A.createBuffer(1,A.sampleRate*3,A.sampleRate);
+    const data=noiseBuffer.getChannelData(0);
+    for(let i=0;i<data.length;i++) data[i]=(Math.random()*2-1)*.24;
+    noise.buffer=noiseBuffer; noise.loop=true;
+    const noiseFilter=A.createBiquadFilter(); noiseFilter.type='lowpass'; noiseFilter.frequency.value=700;
+    const noiseGain=A.createGain(); noiseGain.gain.value=.022;
+    noise.connect(noiseFilter); noiseFilter.connect(noiseGain); noiseGain.connect(master);
+
+    const pulse=A.createOscillator(), pulseGain=A.createGain();
+    pulse.type='sine'; pulse.frequency.value=.16; pulseGain.gain.value=.008;
+    pulse.connect(pulseGain); pulseGain.connect(master.gain);
+
+    bass.start(); fifth.start(); noise.start(); pulse.start();
+    ambientNodes=[bass,fifth,noise,pulse,bassGain,fifthGain,noiseFilter,noiseGain,pulseGain,master,filter];
+    ambientMusicTick();
+    ambientTimer=setInterval(ambientMusicTick,4800);
   } catch {}
 }
 function stopAmbient(){
   ambientNodes.forEach(n=>{ try{ n.stop?.(); }catch{} try{ n.disconnect?.(); }catch{} });
   ambientNodes=[];
+  if(ambientTimer){ clearInterval(ambientTimer); ambientTimer=null; }
 }
 function updateSoundButton(){
   const b=$('#soundButton'); if(!b) return;
@@ -110,15 +203,87 @@ function updateSoundButton(){
 function footsteps(){ tone(95,.12,'triangle',.025); setTimeout(()=>tone(75,.14,'triangle',.025),280); }
 function bell(){ tone(196,.55,'sine',.035); setTimeout(()=>tone(98,.8,'sine',.02),90); }
 function successSound(){ tone(293,.12,'sine',.025); setTimeout(()=>tone(440,.18,'sine',.03),130); }
-function failSound(){ tone(90,.18,'sawtooth',.025); document.body.classList.remove('failure-pulse'); void document.body.offsetWidth; document.body.classList.add('failure-pulse'); }
+function scareStinger(){
+  if(!soundEnabled) return;
+  try{
+    const A=getAudioCtx(); if(!A) return;
+    const o=A.createOscillator(), g=A.createGain();
+    o.type='sawtooth'; o.frequency.setValueAtTime(92,A.currentTime); o.frequency.exponentialRampToValueAtTime(38,A.currentTime+.75);
+    g.gain.setValueAtTime(.055,A.currentTime); g.gain.exponentialRampToValueAtTime(.0001,A.currentTime+.8);
+    o.connect(g); g.connect(A.destination); o.start(); o.stop(A.currentTime+.82);
+    setTimeout(()=>tone(740,.08,'square',.018),120);
+  }catch{}
+}
+function shadowScare(){
+  if(scareCooldown || state.screen==='home') return;
+  scareCooldown=true;
+  state.fearLevel=Math.min(6,(state.fearLevel||0)+1); saveState();
+  const stories=[
+    ['UN BRUIT DERRIÈRE VOUS','Un pas résonne dans la brume… mais personne ne devrait marcher derrière le groupe.'],
+    ['LA BRUME SE RESSERRE','Pendant un instant, le chemin semble plus étroit. L’Ombre a senti votre hésitation.'],
+    ['QUELQUE CHOSE A BOUGÉ','Une silhouette traverse le bord de votre vision. Lorsque vous vous retournez, il n’y a plus rien.'],
+    ['LE SCEAU SE FISSURE','Une vibration remonte de la pierre. Chaque erreur donne un peu plus de force à ce qui attend sous Layer.'],
+    ['ELLE CONNAÎT VOS NOMS','Un murmure répète quatre prénoms, très bas, comme s’il venait du sol. L’Ombre vous a trouvés.'],
+    ['ELLE EST PROCHE','La lumière semble baisser autour de vous. Le prochain choix doit être le bon.']
+  ];
+  const [title,body]=stories[Math.min(state.fearLevel-1,stories.length-1)];
+  const old=document.querySelector('.shadow-scare'); old?.remove();
+  const el=document.createElement('div'); el.className=`shadow-scare fear-${state.fearLevel}`;
+  el.innerHTML=`<div class="shadow-scare-fog"></div><div class="shadow-figure"><i></i></div><div class="shadow-scare-content"><div class="shadow-scare-kicker">Présence détectée</div><div class="shadow-scare-title">${escapeHtml(title)}</div><p>${escapeHtml(body)}</p></div>`;
+  document.body.appendChild(el); requestAnimationFrame(()=>el.classList.add('show'));
+  scareStinger(); haptic([80,50,120,50,180]);
+  setTimeout(()=>el.classList.add('leave'),1500);
+  setTimeout(()=>{el.remove();scareCooldown=false;},2200);
+}
+function failSound(){ tone(90,.18,'sawtooth',.025); document.body.classList.remove('failure-pulse'); void document.body.offsetWidth; document.body.classList.add('failure-pulse'); shadowScare(); }
 function omen(title, subtitle=''){
   const old=document.querySelector('.scene-omen'); if(old) old.remove();
   const el=document.createElement('div'); el.className='scene-omen';
   el.innerHTML=`<div class="omen-rune">✦</div><div class="omen-title">${escapeHtml(title)}</div>${subtitle?`<div class="omen-sub">${escapeHtml(subtitle)}</div>`:''}`;
   document.body.appendChild(el);
   requestAnimationFrame(()=>el.classList.add('show'));
-  setTimeout(()=>el.classList.add('leave'),1100);
-  setTimeout(()=>el.remove(),1900);
+  setTimeout(()=>el.classList.add('leave'),2300);
+  setTimeout(()=>el.remove(),3200);
+}
+
+let sceneTransitionLock = false;
+function transitionSound(){
+  if(!soundEnabled) return;
+  tone(174,.08,'triangle',.015);
+  setTimeout(()=>tone(220,.1,'triangle',.017),90);
+  setTimeout(()=>tone(294,.14,'sine',.018),190);
+}
+function transitionStep(title, subtitle, callback, icon='✦'){
+  if(sceneTransitionLock) return;
+  sceneTransitionLock = true;
+  const old=document.querySelector('.scene-transition'); if(old) old.remove();
+  const el=document.createElement('div');
+  el.className='scene-transition';
+  el.innerHTML=`<div class="scene-transition-inner"><div class="transition-sigil">${icon}</div><div class="transition-kicker">Le Livre tourne une page</div><div class="transition-title">${escapeHtml(title)}</div>${subtitle?`<div class="transition-sub">${escapeHtml(subtitle)}</div>`:''}<div class="transition-trace"></div></div>`;
+  document.body.appendChild(el);
+  requestAnimationFrame(()=>el.classList.add('show'));
+  transitionSound();
+  setTimeout(()=>el.classList.add('leave'), 3500);
+  setTimeout(()=>{ el.remove(); sceneTransitionLock = false; callback?.(); }, 4400);
+}
+
+function cinematicIntro(callback){
+  if(sceneTransitionLock) return;
+  sceneTransitionLock = true;
+  const old=document.querySelector('.cinematic-intro'); if(old) old.remove();
+  const el=document.createElement('div');
+  el.className='cinematic-intro';
+  el.innerHTML=`<div class="cinematic-intro-bg"></div><div class="cinematic-intro-vignette"></div><div class="cinematic-intro-content"><div class="cinematic-kicker">Le Livre s’ouvre</div><div class="cinematic-title">Les Quatre Veilleurs</div><p class="cinematic-line">Dans la roche de Layer, un ancien serment vacille.</p><p class="cinematic-line delay-2">Quatre noms sont appelés pour reprendre les fragments du sceau.</p><p class="cinematic-line delay-3">Et avant la tombée du soir… l’Ombre devra être repoussée.</p></div>`;
+  document.body.appendChild(el);
+  if(soundEnabled){
+    tone(110,.35,'sine',.01);
+    setTimeout(()=>tone(147,.35,'triangle',.012),280);
+    setTimeout(()=>tone(196,.45,'sine',.014),620);
+    setTimeout(()=>tone(262,.55,'sine',.017),1060);
+  }
+  requestAnimationFrame(()=>el.classList.add('show'));
+  setTimeout(()=>el.classList.add('leave'), 7300);
+  setTimeout(()=>{ el.remove(); sceneTransitionLock = false; callback?.(); }, 8200);
 }
 function initAtmosphere(){
   const box=$('#ambientRunes'); if(!box || box.children.length) return;
@@ -174,19 +339,20 @@ function chapterBadge(title, subtitle=''){ return `<div class="chapter-badge"><s
 function loreBlock(title, text){ return `<div class="lore-block"><div class="lore-title">${escapeHtml(title)}</div><p>${text}</p></div>`; }
 function destinationBlock(title, detail, note=''){ return `<div class="destination-block"><div class="destination-icon">⌖</div><div><div class="destination-title">${escapeHtml(title)}</div><div class="destination-detail">${escapeHtml(detail)}</div>${note?`<div class="destination-note">${escapeHtml(note)}</div>`:''}</div></div>`; }
 
-function illustrationSvg(kind){
-  const svgs={
-    book:`<svg viewBox="0 0 320 180" role="img" aria-label="Livre des Veilleurs"><defs><linearGradient id="g1" x1="0" x2="1"><stop offset="0" stop-color="#b0864e"/><stop offset="1" stop-color="#f0d49a"/></linearGradient></defs><rect x="22" y="24" width="276" height="132" rx="16" fill="#140f17" stroke="#6f5842"/><path d="M42 42h100c18 0 28 7 38 16v76c-10-9-20-16-38-16H42z" fill="#241826" stroke="#d7ae67"/><path d="M278 42H178c-18 0-28 7-38 16v76c10-9 20-16 38-16h100z" fill="#1a131d" stroke="#d7ae67"/><path d="M160 39v100" stroke="url(#g1)" stroke-width="3" opacity=".9"/><circle cx="86" cy="78" r="18" fill="none" stroke="#d7ae67"/><path d="M86 60v36M68 78h36" stroke="#d7ae67"/><circle cx="234" cy="78" r="18" fill="none" stroke="#d7ae67"/><path d="M234 60l10 18-10 18-10-18z" fill="none" stroke="#d7ae67"/><text x="77" y="128" fill="#eeddba" font-size="18">1292</text><text x="207" y="128" fill="#eeddba" font-size="18">✦ ✦ ✦</text></svg>`,
-    stone:`<svg viewBox="0 0 320 180" role="img" aria-label="Énigme de pierre"><rect width="320" height="180" rx="18" fill="#120e15"/><path d="M44 152h232" stroke="#6f625b"/><path d="M70 146V86l48-34 48 34v60z" fill="#282029" stroke="#d7ae67"/><path d="M166 146V74l38-28 38 28v72z" fill="#201821" stroke="#cba56a"/><path d="M188 88h31v58h-31z" fill="#130f17" stroke="#9b7d50"/><circle cx="117" cy="86" r="11" fill="none" stroke="#d7ae67"/><path d="M117 74v24M105 86h24" stroke="#d7ae67"/><text x="95" y="134" fill="#efe2c6" font-size="24" letter-spacing="3">1828</text><path d="M250 52c8 10 12 22 12 35" stroke="#9986b7" fill="none"/><path d="M245 63l13-8 7 14" stroke="#9986b7" fill="none"/></svg>`,
-    water:`<svg viewBox="0 0 320 180" role="img" aria-label="Gardien des eaux"><rect width="320" height="180" rx="18" fill="#0f1218"/><path d="M32 122h256v28H32z" fill="#2a313d" stroke="#7ea6bb"/><path d="M48 58h224v64H48z" fill="#1f2831" stroke="#d7ae67"/><text x="132" y="76" fill="#f0deba" font-size="20">1861</text><path d="M153 105c14-20 36-18 47 0-8 7-9 17-30 17-10 0-15-4-17-17z" fill="#5f879a" stroke="#d7ae67"/><circle cx="176" cy="99" r="3" fill="#f7f0df"/><path d="M198 84v32M190 92h16M192 101h12" stroke="#d7ae67" stroke-width="3"/><path d="M72 132c24-9 40-9 64 0M136 132c24-9 40-9 64 0M200 132c24-9 40-9 64 0" stroke="#76abc0" fill="none"/></svg>`,
-    walk:`<svg viewBox="0 0 320 180" role="img" aria-label="Marche vers Layer"><rect width="320" height="180" rx="18" fill="#0c0c11"/><circle cx="250" cy="42" r="20" fill="#f0d49a" opacity=".9"/><path d="M18 150c35-42 74-62 112-62 42 0 69 22 95 22 24 0 46-8 78-34" stroke="#d7ae67" stroke-width="3" fill="none"/><path d="M0 160h320" stroke="#4c4455"/><path d="M66 150l20-44 20 44z" fill="#18141c" stroke="#8e7a59"/><path d="M130 150l28-58 28 58z" fill="#17131b" stroke="#8e7a59"/><path d="M220 70c-7 7-14 9-22 6 8 3 14 9 17 17" stroke="#9f8fba" fill="none"/><text x="42" y="44" fill="#e8ddc8" font-size="18">Layer</text></svg>`,
-    chapel:`<svg viewBox="0 0 320 180" role="img" aria-label="Chapelle Sainte-Madeleine"><rect width="320" height="180" rx="18" fill="#111015"/><path d="M44 148h230" stroke="#5d5664"/><path d="M70 148V90l48-30 48 30v58z" fill="#221a24" stroke="#d7ae67"/><path d="M166 148V82l28-18 28 18v66z" fill="#1b151e" stroke="#d7ae67"/><path d="M188 98h12v50h-12z" fill="#0f0c12" stroke="#9f855a"/><circle cx="214" cy="48" r="27" fill="none" stroke="#d7ae67" opacity=".85"/><path d="M214 24l7 15 16 2-12 11 3 16-14-8-14 8 3-16-12-11 16-2z" fill="none" stroke="#d7ae67"/></svg>`,
-    treasure:`<svg viewBox="0 0 320 180" role="img" aria-label="Trésor"><rect width="320" height="180" rx="18" fill="#100d14"/><path d="M76 124h168v22H76z" fill="#332216" stroke="#d7ae67"/><path d="M86 80h148c18 0 30 12 30 26v18H56v-18c0-14 12-26 30-26z" fill="#4b3220" stroke="#d7ae67"/><path d="M160 80v66" stroke="#d7ae67"/><rect x="148" y="102" width="24" height="22" rx="4" fill="#c5a161" stroke="#f5e2bd"/><path d="M52 46l20 10M258 40l-20 12M108 38l10 16M212 36l-10 16" stroke="#f0d49a"/><circle cx="72" cy="52" r="3" fill="#f0d49a"/><circle cx="248" cy="56" r="3" fill="#f0d49a"/></svg>`
-  };
-  return svgs[kind] || svgs.book;
-}
+const ILLUSTRATIONS = {
+  book: 'assets/book.png',
+  stone: 'assets/church.png',
+  water: 'assets/fountain.png',
+  walk: 'assets/walk.png',
+  chapel: 'assets/chapel.png',
+  treasure: 'assets/treasure.png'
+};
 function illustrationBlock(kind, title='', caption=''){
-  return `<figure class="illustration-card ${kind}"><div class="illustration-frame">${illustrationSvg(kind)}</div>${title||caption?`<figcaption><strong>${escapeHtml(title)}</strong>${caption?`<span>${escapeHtml(caption)}</span>`:''}</figcaption>`:''}</figure>`;
+  const src = ILLUSTRATIONS[kind] || ILLUSTRATIONS.book;
+  return `<figure class="illustration-card ${kind}"><div class="illustration-frame"><img src="${src}" alt="${escapeHtml(title || 'Illustration de l’aventure')}" loading="lazy"></div>${title||caption?`<figcaption><strong>${escapeHtml(title)}</strong>${caption?`<span>${escapeHtml(caption)}</span>`:''}</figcaption>`:''}</figure>`;
+}
+function suspensePanel(title, text, mode='veil'){
+  return `<div class="suspense-panel ${mode}"><div class="suspense-fog"></div><div class="suspense-glow"></div><div class="suspense-content"><div class="suspense-kicker">Entre deux étapes</div><h3>${escapeHtml(title)}</h3><p>${escapeHtml(text)}</p><div class="suspense-runes"><span>✦</span><span>☾</span><span>ᚱ</span><span>⌖</span></div></div></div>`;
 }
 function sealBurstHtml(icon){
   const parts = Array.from({length:18}, (_,i)=>`<i style="--ang:${i*20}deg;--dist:${62 + (i%4)*12}px;--delay:${(i%5)*0.04}s"></i>`).join('');
@@ -205,6 +371,25 @@ function revealSound(){
   tone(140,.08,'sawtooth',.012);
   setTimeout(()=>tone(220,.1,'triangle',.013),70);
   setTimeout(()=>tone(330,.14,'sine',.015),140);
+}
+
+function victoryChime(){
+  if(!soundEnabled) return;
+  [196,246.94,293.66,392,493.88,587.33].forEach((n,i)=>setTimeout(()=>ambientPadNote(n,3.6,.014),i*180));
+  setTimeout(()=>tone(783.99,.75,'sine',.018),1000);
+}
+function finalSealShow(callback){
+  const old=document.querySelector('.seal-cinematic'); if(old) old.remove();
+  const el=document.createElement('div');
+  el.className='seal-cinematic victory-ritual';
+  const motes=Array.from({length:36},(_,i)=>`<i style="--a:${i*10}deg;--d:${(i%9)*.05}s;--r:${80+(i%6)*22}px"></i>`).join('');
+  el.innerHTML=`<div class="victory-veil"></div><div class="victory-motes">${motes}</div><div class="seal-cinematic-inner"><div class="guardian-orbit"><span>🔥</span><span>👁</span><span>ᚱ</span><span>🗝</span></div><div class="seal-cinematic-rings"><span></span><span></span><span></span><span></span></div><div class="seal-cinematic-core">✦</div><div class="seal-cinematic-title">Le sceau vous reconnaît</div><div class="seal-cinematic-sub">Les quatre forces se rejoignent. La brume recule, les signes se rallument et l’Ombre perd prise sur Layer.</div><div class="victory-word">VICTOIRE DES VEILLEURS</div></div>`;
+  document.body.appendChild(el);
+  victoryChime();
+  requestAnimationFrame(()=>el.classList.add('show'));
+  setTimeout(()=>{el.classList.add('resolved');haptic([80,80,120,80,160]);},1900);
+  setTimeout(()=>el.classList.add('leave'),4800);
+  setTimeout(()=>{el.remove();callback?.();},5700);
 }
 
 async function requestWakeLock(){ try { if('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen'); } catch {} }
@@ -230,7 +415,7 @@ function liveTick(){
   if(s === 'walk') updateWalk();
   if(s === 'gate-chapelle') maybeAutoUnlock('chapelle', renderFinale);
 }
-function maybeAutoUnlock(key, fn){ const l = config.locations[key]; const d = distanceTo(key); if(Number.isFinite(d) && d <= Number(l.radius || 55)){ haptic(); fn(); } }
+function maybeAutoUnlock(key, fn){ const l = config.locations[key]; const d = distanceTo(key); if(sceneTransitionLock) return; if(Number.isFinite(d) && d <= Number(l.radius || 55)){ haptic(); transitionStep('Lieu atteint', l.name, fn, '⌖'); } }
 
 function renderHome(){
   state.screen='home'; saveState();
@@ -239,18 +424,21 @@ function renderHome(){
       <div class="crest">✦</div>
       <div class="kicker">Bissey-la-Côte • Layer-sur-Roche</div>
       <h1>Le Sceau des<br>Quatre Veilleurs</h1>
-      <p class="hero-subtitle">Un récit de pierre, d’eau, d’ombre et de serment.</p>
+      <p class="hero-subtitle">Un récit de signes, de brume, d’ombre et de serment.</p>
       ${progressHtml(state.completed.length>=6?4:Math.min(3,Object.keys(state.fragments).length))}
       ${card(`${chapterBadge('Livre des Veilleurs','Préface')}
         ${illustrationBlock('book','Le Livre des Veilleurs','Le récit ancien se rouvre au moment où le sceau vacille.')}
-        <p class="story dropcap">Il y a bien longtemps, quatre Veilleurs se sont réunis pour enfermer une présence sans nom sous la pierre de Layer. Leur serment a traversé les siècles. Cette nuit, le sceau faiblit. Si les quatre marques ne sont pas retrouvées avant la tombée du soir, l’Ombre quittera son sommeil.</p>
-        ${loreBlock('Votre mission', 'Suivez les traces des anciens gardiens, résolvez les énigmes et reconstituez le sceau. Chacun des quatre joueurs recevra un fragment secret : aucune victoire n’est possible sans les autres.')}
-        <p class="small">Le GPS reste sur ce téléphone. Aucune position n’est envoyée à un serveur.</p>
-        ${btn(state.startedAt ? 'Reprendre le récit' : 'Ouvrir le Livre des Veilleurs', 'startBtn', 'good')}
+        ${suspensePanel('Un vieux serment se réveille','Le Livre appelle les quatre noms, et la roche de Layer recommence à murmurer.','intro')}
+        <p class="story dropcap">Il y a bien longtemps, une présence errante venue des cavités de la roche s’est glissée jusqu’aux hauteurs de Layer. Les anciens l’ont nommée l’Ombre, car elle avançait là où la lumière faiblissait, volait la mémoire des chemins et attirait les voyageurs hors de la route. Pour l’enfermer, quatre Veilleurs ont uni leurs forces et ont partagé le sceau en quatre parts. Cette nuit, le vieux lien se fissure de nouveau.</p>
+        ${loreBlock('Le danger', 'Si l’Ombre s’échappe, elle brouillera les repères, éteindra les signes protecteurs du village et ouvrira de nouveau le passage de Layer. Plus la nuit avancera, plus elle gagnera en force.')}
+        ${loreBlock('Pourquoi quatre Veilleurs ?', 'Parce qu’aucun gardien ne peut contenir seul l’Ombre. Quatre forces différentes doivent être réunies. Chacun des joueurs recevra un fragment secret : aucune victoire n’est possible sans les autres.')}
+        ${loreBlock('Votre mission', 'Suivez les traces des anciens gardiens, résolvez les énigmes et reconstituez le sceau avant que l’Ombre ne franchisse à nouveau la roche de Layer.')}
+        ${adventureLocked() ? countdownHtml() : btn(state.startedAt ? 'Reprendre le récit' : 'Ouvrir le Livre des Veilleurs', 'startBtn', 'good')}
         ${state.startedAt ? btn('Recommencer depuis le début', 'resetBtn', 'secondary') : ''}
       `, 'hero-card')}
     </div>`;
-  $('#startBtn').onclick = ()=>{ if(!state.startedAt) state.startedAt = Date.now(); saveState(); requestWakeLock(); startGeo(); startAmbient(); renderPrologue(); };
+  if(adventureLocked()) startCountdownTicker();
+  $('#startBtn')?.addEventListener('click', ()=>{ if(!state.startedAt) state.startedAt = Date.now(); saveState(); requestWakeLock(); startGeo(); startAmbient(); cinematicIntro(renderPrologue); });
   $('#resetBtn')?.addEventListener('click', ()=>{ if(confirm('Effacer toute la progression ?')) resetGame(); });
 }
 
@@ -259,10 +447,12 @@ function renderPrologue(){
   app.innerHTML = card(`
     ${chapterBadge('Prologue','Le Pacte des Quatre')}
     <h2>Le Livre s’ouvre</h2>
-    <p class="quote">1292. Lorsque la chapelle de Layer s’éleva sur la roche, quatre Veilleurs lièrent leurs forces pour y enfermer l’Ombre. Chacun prit un rôle. Chacun garda une part du sceau.</p>
-    ${illustrationBlock('book','L’appel des anciens','Quatre rôles, quatre fragments, un même serment.')}
-    <p class="story">Aujourd’hui, ce sceau s’est fissuré. Les noms des anciens gardiens ont disparu, mais le Livre a reconnu quatre nouveaux porteurs : Vadim, Louise, Soline et Sacha.</p>
-    ${loreBlock('Le danger', 'Si les quatre marques ne sont pas retrouvées, le passage de Layer s’ouvrira de nouveau. Le village tout entier tombera sous la garde de l’Ombre.')}
+    <p class="quote">L’Ombre n’est pas née d’un lieu, mais d’un passage. Elle aurait émergé lorsque la roche de Layer s’est ouverte, un soir de brume, pour laisser monter une présence sans visage, capable d’éteindre les repères et de semer la confusion.</p>
+    ${illustrationBlock('book','Le serment des anciens','Quatre Veilleurs, un sceau, une promesse à renouveler.')}
+    <p class="story">Pour l’empêcher de gagner le village, quatre Veilleurs se sont partagé un sceau ancien : l’un gardait la Flamme, l’autre l’Œil, le troisième la Rune, et le dernier la Clé. Tant que ces quatre forces demeuraient unies, l’Ombre restait enfermée sous la roche de Layer. Aujourd’hui, ce sceau s’est fissuré. Les noms des anciens gardiens ont disparu, mais le Livre a reconnu quatre nouveaux porteurs : Vadim, Louise, Soline et Sacha.</p>
+    ${loreBlock('D’où vient l’Ombre ?', 'Des profondeurs de la roche de Layer, là où les anciens craignaient un passage entre le monde des vivants et une obscurité plus ancienne. Elle ne possède ni visage ni voix propre : elle s’attache aux lieux, aux peurs et aux chemins oubliés.')} 
+    ${loreBlock('Quel est le danger ?', 'Si le sceau cède entièrement, l’Ombre s’étendra hors de Layer, fera disparaître les signes de protection et perdra les voyageurs en brouillant les chemins et les souvenirs.')} 
+    ${loreBlock('Pourquoi faut-il quatre Veilleurs ?', 'Parce qu’aucune force seule ne suffit : il faut l’observation, la mémoire, le déchiffrement et la décision. Les quatre fragments du sceau ont été séparés pour empêcher qu’un seul gardien ne tombe ou ne cède.')} 
     <p class="center"><strong>Vous avez deux heures.</strong></p>
     <div class="symbols role-grid">
       <div class="sigil"><span>🔥</span><small>Sacha<br>Porte-Flamme</small></div>
@@ -273,7 +463,7 @@ function renderPrologue(){
     <p class="small center">Chacun sera nécessaire. Certains indices n’apparaîtront qu’à un seul Veilleur.</p>
     ${btn('Jurer le pacte', 'oathBtn')}
   `, 'chapter-card');
-  $('#oathBtn').onclick = ()=>{ complete('prologue'); renderGateMairie(); };
+  $('#oathBtn').onclick = ()=>{ complete('prologue'); transitionStep('Le Premier Appel','Le point d’éveil vous attend au cœur du village', renderGateMairie, '⌖'); };
 }
 
 function renderGateMairie(){
@@ -284,6 +474,7 @@ function renderGateMairie(){
     <p class="story">Le Livre ne peut prononcer la suite qu’au lieu où les nouveaux Veilleurs sont appelés. Rejoignez le cœur du village pour entendre la première injonction.</p>
     ${destinationBlock('Repère du Livre', 'Mairie de Bissey-la-Côte — 9 rue Haute', 'Le sceau se déverrouillera automatiquement à proximité.')}
     ${illustrationBlock('book','Le point d’éveil','Le Livre désigne le lieu du départ avant d’ouvrir la première direction.')}
+    ${suspensePanel('Le village retient son souffle','Approchez du point d’éveil. Lorsque vous serez assez près, le Livre prononcera la suite.')}
     <div id="geoStatus">${geoStatusHtml()}</div>
     <div class="distance" id="liveDistance" data-target="mairie">${fmtDistance(distanceTo('mairie'))}</div>
     <div class="small center">Rayon de déverrouillage : ${l.radius} m</div>
@@ -297,22 +488,24 @@ function renderMairie(){
   app.innerHTML = card(`
     ${chapterBadge('Chapitre I','Le Premier Veilleur')}
     <h2>La première direction</h2>
-    <p class="quote">Cherchez la maison où le temps est gravé dans la pierre.</p>
-    ${illustrationBlock('stone','Le clocher et la pierre','Le premier sceau sommeille là où le temps a été gravé.')}
+    <p class="quote">Cherchez la maison où le temps est gravé dans ses murs.</p>
+    ${illustrationBlock('stone','Le clocher et le temps','Une inscription ancienne veille, silencieuse, au cœur du village.')}
     <p class="story">Là où résonnent les cloches, la mémoire du village dort encore dans la matière. Le premier sceau n’est pas caché : il attend d’être reconnu.</p>
-    ${loreBlock('Ce que murmure le Livre', 'La première marque est liée à la pierre. Elle ne se révèle qu’à ceux qui savent observer avant de déchiffrer.')}
-    ${btn('Partir vers la Pierre', 'toChurch')}
+    ${loreBlock('Ce que murmure le Livre', 'La première marque dort dans la matière. Elle ne se révèle qu’à ceux qui savent observer avant de déchiffrer.')}
+    ${btn('Suivre le premier signe', 'toChurch')}
   `, 'chapter-card');
-  $('#toChurch').onclick = ()=>{ complete('mairie'); renderGateEglise(); };
+  $('#toChurch').onclick = ()=>{ complete('mairie'); transitionStep('Vers le premier sceau','Cherchez le clocher qui garde le premier signe', renderGateEglise, '✦'); };
 }
 
 function renderGateEglise(){
   state.screen='gate-eglise'; saveState(); startGeo(); const l = config.locations.eglise;
   app.innerHTML = card(`
-    ${chapterBadge('Épreuve I','La Pierre du Temps')}
+    ${chapterBadge('Épreuve I','Le Temps Gravé')}
     <h2>Approchez du premier sceau</h2>
     <p class="story">Les cloches ne gardent pas seulement l’heure. Elles veillent sur la date qui ouvrira la première marque.</p>
+    ${illustrationBlock('stone','Le clocher veille déjà','Un premier signe attend les Veilleurs au pied du clocher.')}
     ${destinationBlock('Repère du Livre', 'Église de la Nativité — rue Haute', 'Cherchez le clocher dans le village ; l’épreuve s’ouvrira lorsque vous serez assez près.')}
+    ${suspensePanel('Le premier sceau attend','Le signe sommeille encore. Le clocher ne parlera qu’à courte distance.')}
     <div id="geoStatus">${geoStatusHtml()}</div>
     <div class="distance" id="liveDistance" data-target="eglise">${fmtDistance(distanceTo('eglise'))}</div>
     <div class="small center">Déverrouillage à ${l.radius} m</div>
@@ -321,13 +514,13 @@ function renderGateEglise(){
 }
 
 function renderEglise(){
-  state.screen='eglise'; saveState(); bell(); omen('LA PIERRE S’ÉVEILLE','Épreuve I');
+  state.screen='eglise'; saveState(); bell(); omen('LE PREMIER SCEAU S’ÉVEILLE','Épreuve I');
   app.innerHTML = card(`
-    ${chapterBadge('Épreuve I','La Pierre du Temps')}
+    ${chapterBadge('Épreuve I','Le Temps Gravé')}
     <h2>Le temps est gravé</h2>
     ${progressHtml(1)}
-    ${illustrationBlock('stone','Lecture de la pierre','Observez, puis déchiffrez : la matière parle avant les lettres.')}
-    <p class="quote">Les vivants regardent leur montre. Les anciens, eux, gravaient le temps dans la pierre.</p>
+    ${illustrationBlock('stone','Le temps gravé','Observez les détails, puis laissez les signes parler.')}
+    <p class="quote">Les vivants regardent leur montre. Les anciens, eux, gravaient le temps sur leurs murs.</p>
     <p><strong>Soline et Sacha :</strong> trouvez sur place l’année à quatre chiffres.</p>
     <input class="input" id="yearInput" inputmode="numeric" maxlength="4" placeholder="_ _ _ _" aria-label="Année gravée" />
     <button class="btn" id="yearCheck">Valider l’année</button>
@@ -355,7 +548,7 @@ function renderEglise(){
       revealSound();
       $('#churchPart2').classList.remove('hidden');
       $('#churchPart2').classList.add('ink-reveal');
-      $('#churchMsg').innerHTML = '<p class="success">✓ 1828. La date ouvre un second mécanisme destiné aux plus grands.</p>';
+      $('#churchMsg').innerHTML = '<p class="success">✓ La date est juste. Un second mécanisme s’ouvre pour les plus grands.</p>';
     } else {
       failSound();
       $('#churchMsg').innerHTML = '<p class="error">Ce n’est pas l’année attendue.</p>';
@@ -387,22 +580,43 @@ function renderFragment(who, digit, icon, name, next){
     <h2 class="center">La Marque de la ${name}</h2>
     <p class="quote">Passez le téléphone à <strong>${who}</strong>. Les autres détournent les yeux.</p>
     <div class="sep"></div>
-    <p class="center">Le Livre confie à ${who} ce fragment secret :</p>
-    <div class="distance fragment-digit">${digit}</div>
+    <p class="center">Le Livre confie à ${who} un fragment encore caché.</p>
+    <button type="button" class="fragment-reveal" id="fragmentReveal" aria-expanded="false" aria-label="Révéler le fragment de sceau">
+      <span class="fragment-cover" id="fragmentCover">
+        <span class="fragment-cover-kicker">Fragment secret</span>
+        <strong>Toucher pour révéler</strong>
+        <small>Quand le bon Veilleur tient le téléphone</small>
+      </span>
+      <span class="distance fragment-digit hidden" id="fragmentDigit">${digit}</span>
+    </button>
     <p class="small center">Mémorise-le. Il sera indispensable devant la chapelle.</p>
     ${btn('Je l’ai mémorisé', 'memorized')}
   `, 'chapter-card fragment-card seal-recovered');
-  $('#memorized').onclick = next;
+  const reveal = $('#fragmentReveal');
+  const cover = $('#fragmentCover');
+  const digitEl = $('#fragmentDigit');
+  reveal?.addEventListener('click', ()=>{
+    if(!digitEl.classList.contains('hidden')) return;
+    digitEl.classList.remove('hidden');
+    cover.classList.add('fade-out');
+    reveal.setAttribute('aria-expanded','true');
+    haptic([25,50,100]);
+    revealSound();
+    setTimeout(()=>cover.remove(),280);
+  });
+  $('#memorized').onclick = ()=> transitionStep('Une nouvelle page s’écrit','Le Livre vous entraîne vers l’étape suivante', next, icon);
 }
 
 function renderGateFontaine(){
   state.screen='gate-fontaine'; saveState(); startGeo(); const l = config.locations.fontaine;
   app.innerHTML = card(`
-    ${chapterBadge('Épreuve II','Le Gardien des Eaux')}
-    <h2>Descendre vers l’eau</h2>
-    <p class="quote">Descendez là où la pierre donne à boire. Quelque chose vous y regarde depuis 1861.</p>
+    ${chapterBadge('Épreuve II','Le Gardien du Bassin')}
+    <h2>Descendre vers le bassin</h2>
+    <p class="quote">Descendez là où la pierre donne à boire. Quelque chose vous y observe, immobile, depuis très longtemps.</p>
     <p class="story">Le second sceau n’est pas gardé par un homme, mais par une présence sculptée qui ne quitte jamais son bassin.</p>
+    ${illustrationBlock('water','Le bassin du Gardien','La surface sombre reflète à peine la créature qui veille.')}
     ${destinationBlock('Repère du Livre', 'Fontaine-abreuvoir — rue de l’Abreuvoir', 'Depuis l’église, descendez vers la rue de l’Abreuvoir et cherchez la fontaine de pierre.')}
+    ${suspensePanel('Le bassin garde un secret','Sous la surface noire, le Gardien attend que vous vous approchiez assez.')}
     <div id="geoStatus">${geoStatusHtml()}</div>
     <div class="distance" id="liveDistance" data-target="fontaine">${fmtDistance(distanceTo('fontaine'))}</div>
     ${!targetPoint('fontaine')
@@ -413,13 +627,13 @@ function renderGateFontaine(){
 }
 
 function renderFontaine(){
-  state.screen='fontaine'; saveState(); omen('LE GARDIEN DES EAUX','Épreuve II');
+  state.screen='fontaine'; saveState(); omen('LE GARDIEN DU BASSIN','Épreuve II');
   app.innerHTML = card(`
-    ${chapterBadge('Épreuve II','Le Gardien des Eaux')}
-    <h2>Le reflet de la seconde marque</h2>
+    ${chapterBadge('Épreuve II','Le Gardien du Bassin')}
+    <h2>Le secret du second sceau</h2>
     ${progressHtml(2)}
-    ${illustrationBlock('water','Le Gardien des eaux','Un regard sculpté, une date gravée, puis un mot à extraire.')}
-    <p class="quote">Ne touchez pas l’eau. Le deuxième Veilleur n’était pas humain.</p>
+    ${illustrationBlock('water','Le Gardien du bassin','Une présence sculptée veille, immobile, au-dessus du vieux bassin.')}
+    <p class="quote">Ne touchez pas la surface. Le deuxième Veilleur n’était pas humain.</p>
     <p><strong>Sacha :</strong> trouve l’arme portée par la créature.</p>
     <div class="choice-grid" id="weaponChoices">
       <button class="choice" data-v="trident">🔱 Trident</button>
@@ -438,11 +652,11 @@ function renderFontaine(){
         <p>Le Livre inscrit quatre lignes. <strong>L’année n’est plus une réponse : elle devient le chemin.</strong></p>
         <div class="rune-lines" aria-label="Quatre lignes de lettres">
           <div><span>I</span><code>ECLATBRUME</code></div>
-          <div><span>II</span><code>OMBRESEAUX</code></div>
+          <div><span>II</span><code>NOCTURNALE</code></div>
           <div><span>III</span><code>BRUMEUROCHE</code></div>
-          <div><span>IV</span><code>XENONPIERRE</code></div>
+          <div><span>IV</span><code>XALBRUMES</code></div>
         </div>
-        <p class="quote">Un chiffre de 1861 pour chaque ligne. Comptez les lettres depuis la gauche.</p>
+        <p class="quote">Utilisez les quatre chiffres trouvés sur place : un chiffre pour chaque ligne. Comptez les lettres depuis la gauche.</p>
         <p class="small">Les quatre lettres obtenues forment un mot.</p>
         <input class="input" id="fountainWord" maxlength="4" placeholder="_ _ _ _" autocomplete="off">
         <button class="btn" id="fountainWordBtn">Prononcer le mot</button>
@@ -460,7 +674,7 @@ function renderFontaine(){
       revealSound();
       $('#fountainDate').classList.remove('hidden');
       $('#fountainDate').classList.add('ink-reveal');
-      $('#fountainMsg').innerHTML = '<p class="success">✓ Le trident a réveillé le Gardien. Cherchez maintenant son année.</p>';
+      $('#fountainMsg').innerHTML = '<p class="success">✓ Le Gardien réagit. Cherchez maintenant les chiffres gravés au-dessus de lui.</p>';
     } else {
       failSound();
       $('#fountainMsg').innerHTML = '<p class="error">Cette arme n’est pas la sienne.</p>';
@@ -472,7 +686,7 @@ function renderFontaine(){
       revealSound();
       $('#fountainFinal').classList.remove('hidden');
       $('#fountainFinal').classList.add('ink-reveal');
-      $('#fountainMsg').innerHTML = '<p class="success">✓ 1861. L’année se transforme en clé de lecture.</p>';
+      $('#fountainMsg').innerHTML = '<p class="success">✓ Les chiffres sont justes. Ils deviennent maintenant une clé de lecture.</p>';
     } else {
       failSound();
       $('#fountainMsg').innerHTML = '<p class="error">Cherchez encore les quatre chiffres gravés.</p>';
@@ -487,7 +701,7 @@ function renderFontaine(){
       setTimeout(()=>renderFragment('Soline','2','💧','Eau', renderWalkIntro),550);
     } else {
       failSound();
-      $('#fountainMsg').innerHTML = '<p class="error">Les quatre lettres ne sont pas encore les bonnes. Utilisez chaque chiffre de 1861 une seule fois, dans l’ordre.</p>';
+      $('#fountainMsg').innerHTML = '<p class="error">Les quatre lettres ne sont pas encore les bonnes. Utilisez les quatre chiffres trouvés, une seule fois chacun, dans l’ordre.</p>';
     }
   };
   bindHints(renderFontaine);
@@ -497,16 +711,16 @@ function renderWalkIntro(){
   state.screen='walk-intro'; saveState();
   app.innerHTML = card(`
     ${chapterBadge('Chapitre II','La Marche de Layer')}
-    <h2>La Porte des Ombres</h2>
+    <h2>La Porte de Layer</h2>
     <p class="quote">Vous quittez maintenant le domaine des vivants.</p>
-    ${illustrationBlock('walk','La route de Layer','La marche elle-même devient une épreuve, sous le regard de l’Ombre.')}
-    <p class="story">Les deux premières marques ont été retrouvées. Mais le Livre devient plus sombre : au-delà du village, la route vers Layer n’est plus un simple chemin. C’est l’épreuve même des Veilleurs.</p>
+    ${illustrationBlock('walk','La route de Layer','La brume se referme, le sentier s’allonge, et l’Ombre se rapproche.')}
+    <p class="story">Les deux premières marques ont été retrouvées. Mais le Livre devient plus sombre : au-delà du village, la route vers Layer n’est plus un simple chemin. Quelque chose semble suivre les Veilleurs à distance.</p>
     ${loreBlock('Ce qui vous attend', 'La distance jusqu’à la chapelle sera votre seul repère. À mesure que vous approcherez, l’Ombre vous éprouvera et révélera deux nouveaux fragments.')}
     ${destinationBlock('Destination', 'Hameau de Layer-sur-Roche — vers la chapelle Sainte-Madeleine', 'Suivez l’itinéraire pédestre reconnu à l’avance. Le téléphone indique la distance restante, pas le chemin à emprunter.')}
     <p class="small">À partir d’ici, l’adulte responsable guide le groupe sur l’itinéraire préparé. Le téléphone devient un radar et déclenche les épreuves au fur et à mesure de l’approche.</p>
-    ${btn('Entrer dans la Marche des Ombres', 'walkBtn')}
+    ${btn('Entrer dans la Marche de Layer', 'walkBtn')}
   `, 'chapter-card');
-  $('#walkBtn').onclick = ()=>{ complete('walk-intro'); renderWalk(); };
+  $('#walkBtn').onclick = ()=>{ complete('walk-intro'); transitionStep('La Marche de Layer','Restez groupés et suivez le chemin vers Layer', renderWalk, '☾'); };
 }
 
 function walkStatus(){
@@ -517,23 +731,25 @@ function walkStatus(){
   else if(d <= t.shadow3) txt = 'La chapelle vous a vus.';
   else if(d <= t.memoryTest) txt = 'Le souvenir gardé par Sacha devient nécessaire.';
   else if(d <= t.memoryShow) txt = 'Restez ensemble. Le chemin écoute vos pas.';
-  else if(d <= t.shadow1) txt = 'Une première Ombre s’éveille.';
+  else if(d <= t.observer) txt = 'L’Œil du Veilleur est appelé.';
+  else if(d <= t.shadow1) txt = 'Quelque chose se rapproche dans la pénombre.';
   return { d, txt };
 }
 
 function renderWalk(){
   state.screen='walk'; saveState(); startGeo(); const w = walkStatus();
   app.innerHTML = card(`
-    ${chapterBadge('Chapitre II','La Marche des Ombres')}
+    ${chapterBadge('Chapitre II','La Marche de Layer')}
     <h2>Ne vous séparez jamais</h2>
     ${destinationBlock('Cap à tenir', 'Chapelle Sainte-Madeleine — Layer-sur-Roche', 'L’adulte guide le chemin ; le radar mesure seulement votre approche de la chapelle.')}
-    ${illustrationBlock('walk','Sous la lune de Layer','Chaque pas rapproche le groupe du dernier sceau.')}
+    ${illustrationBlock('walk','Sous la lune de Layer','Le radar guide l’approche, mais le sentier garde ses propres secrets.')}
+    ${suspensePanel('Brume et attente','Entre deux révélations, restez groupés. Le chemin vous observe et l’Ombre patiente.','travel')}
     <div id="geoStatus">${geoStatusHtml()}</div>
     <div class="radar"></div>
     <div class="distance" id="walkDistance">${fmtDistance(w.d)}</div>
     <p class="center" id="walkText">${escapeHtml(w.txt)}</p>
     <div id="walkEvent"></div>
-    <p class="tiny center">Les événements apparaissent automatiquement à mesure que vous approchez de la chapelle.</p>
+    <p class="tiny center">Le Livre révélera de nouvelles épreuves à mesure que vous approcherez de la chapelle.</p>
   `, 'chapter-card');
   updateWalk();
 }
@@ -543,49 +759,83 @@ function updateWalk(){
   const d = distanceTo('chapelle'), t = config.walkThresholds;
   const dist = $('#walkDistance'); if(dist) dist.textContent = fmtDistance(d);
   const textEl = $('#walkText'); if(textEl) textEl.textContent = walkStatus().txt;
-  if(!Number.isFinite(d)) return;
-  if(d <= t.approach){ complete('walk'); renderGateChapelle(); return; }
-  if(d <= t.shadow3 && !state.walk.shadow3){ state.walk.shadow3 = true; saveState(); showShadow3(); return; }
-  if(d <= t.memoryTest && state.walk.memoryShown && !state.walk.memoryDone){ showMemoryTest(); return; }
-  if(d <= t.memoryShow && !state.walk.memoryShown){ state.walk.memoryShown = true; saveState(); showMemoryPattern(); return; }
-  if(d <= t.shadow1 && !state.walk.shadow1){ state.walk.shadow1 = true; saveState(); showShadow1(); return; }
+  if(!Number.isFinite(d) || sceneTransitionLock || activeWalkEvent) return;
+
+  // Les épreuves restent dans l'ordre, même si le groupe marche plus vite que prévu.
+  if(!state.walk.shadow1 && d <= t.shadow1){ state.walk.shadow1 = true; saveState(); showShadow1(); return; }
+  if(state.walk.shadow1 && !state.walk.observerDone && d <= t.observer){ showObserverChallenge(); return; }
+  if(state.walk.observerDone && !state.walk.memoryShown && d <= t.memoryShow){ state.walk.memoryShown = true; saveState(); showMemoryPattern(); return; }
+  if(state.walk.memoryShown && !state.walk.memoryDone && d <= t.memoryTest){ showMemoryTest(); return; }
+  if(state.walk.memoryDone && !state.walk.shadow3 && d <= t.shadow3){ showShadow3(); return; }
+  if(state.walk.shadow3 && d <= t.approach){ complete('walk'); transitionStep('Le dernier seuil','La Maison de Pierre est toute proche', renderGateChapelle, '✧'); return; }
 }
 
 function showShadow1(){
-  haptic([100,80,100]); footsteps(); omen('OMBRE I','Quelque chose marche avec vous');
+  activeWalkEvent='first';
+  haptic([100,80,100]); footsteps(); omen('UNE PRÉSENCE','Quelque chose marche avec vous');
   const e = $('#walkEvent'); if(!e) return;
-  e.innerHTML = `<div class="sep"></div><h3>OMBRE I</h3><p class="quote">Je grandis lorsque la lumière meurt. Je disparais dans l’obscurité complète. Qui suis-je ?</p><div class="choice-grid"><button class="choice" data-a="ombre">Une ombre</button><button class="choice" data-a="fantome">Un fantôme</button><button class="choice" data-a="brouillard">Du brouillard</button><button class="choice" data-a="corbeau">Un corbeau</button></div><div id="shadow1msg"></div>`;
+  e.innerHTML = `<div class="sep"></div><h3>PREMIÈRE ÉPREUVE</h3><p class="quote">Je vous ressemble sans être vous. Je peux vivre sur une vitre ou à la surface d’un bassin. Dans l’obscurité totale, je disparais. Qui suis-je ?</p><div class="choice-grid"><button class="choice" data-a="reflet">Un reflet</button><button class="choice" data-a="brume">De la brume</button><button class="choice" data-a="corbeau">Un corbeau</button><button class="choice" data-a="murmure">Un murmure</button></div><div id="shadow1msg"></div>`;
   $$('#walkEvent .choice').forEach(b => b.onclick = ()=>{
-    if(b.dataset.a === 'ombre'){
+    if(b.dataset.a === 'reflet'){
       successSound();
-      e.innerHTML = '<div class="hint-box">✓ Alors ne la laissez jamais passer devant vous.</div>';
+      activeWalkEvent=null;
+      e.innerHTML = '<div class="hint-box">✓ Le Livre se tait. Sur la route de Layer, méfiez-vous désormais de ce qui vous ressemble.</div>';
       setTimeout(footsteps, 450);
     } else {
       failSound();
-      $('#shadow1msg').innerHTML = '<p class="error">Elle n’a pas de corps et dépend de la lumière.</p>';
+      $('#shadow1msg').innerHTML = '<p class="error">Cherchez quelque chose qui reproduit une image sans être vivant.</p>';
     }
   });
 }
 
+function showObserverChallenge(){
+  activeWalkEvent='observer';
+  haptic([60,50,60]); omen('L’ŒIL DU VEILLEUR','Soline doit observer sans parler');
+  const e=$('#walkEvent'); if(!e) return;
+  const first=['☾','✦','ᚱ','◊','ᛉ','⌖'];
+  const second=['☾','✦','ᚱ','◇','ᛉ','⌖'];
+  e.innerHTML=`<div class="sep"></div><h3>L’ŒIL DU VEILLEUR</h3><p>Passez le téléphone à <strong>Soline</strong>. Les autres laissent-la observer seule.</p><p class="quote">Six signes apparaissent. Tu as jusqu’à 20 secondes pour retenir leur forme et leur position.</p><div class="observer-sequence">${first.map((s,i)=>`<span><small>${i+1}</small>${s}</span>`).join('')}</div><div class="small center">Temps restant : <span id="observerCountdown">20</span> s</div><button type="button" class="btn secondary" id="observerReady">Je suis prête</button>`;
+  let n=20, switched=false;
+  const switchToQuestion=()=>{
+    if(switched) return; switched=true; clearInterval(id);
+    e.innerHTML=`<div class="sep"></div><h3>L’ŒIL DU VEILLEUR</h3><p class="quote">Un seul signe a changé. Quelle position n’est plus exactement la même ?</p><div class="observer-sequence altered">${second.map((s,i)=>`<span><small>${i+1}</small>${s}</span>`).join('')}</div><div class="observer-answers">${[1,2,3,4,5,6].map(i=>`<button type="button" class="choice" data-pos="${i}">Position ${i}</button>`).join('')}</div><div id="observerMsg"></div>`;
+    $$('#walkEvent [data-pos]').forEach(b=>b.onclick=()=>{
+      if(b.dataset.pos==='4'){
+        state.walk.observerDone=true; saveState(); activeWalkEvent=null; successSound(); revealSound();
+        e.innerHTML='<div class="hint-box">✓ Soline a repéré la variation. L’Œil du Veilleur reste ouvert.</div>';
+      }else{
+        failSound(); $('#observerMsg').innerHTML='<p class="error">Ce signe semble identique. Observe les formes plus attentivement.</p>';
+      }
+    });
+  };
+  $('#observerReady').onclick=switchToQuestion;
+  const id=setInterval(()=>{n--;const c=$('#observerCountdown');if(c)c.textContent=n;if(n<=0)switchToQuestion();},1000);
+}
+
 function showMemoryPattern(){
-  haptic(); omen('OMBRE II','Le Porte-Flamme doit se souvenir');
+  activeWalkEvent='memoryShow';
+  haptic(); omen('LE SOUVENIR','Le Porte-Flamme doit se souvenir');
   const e = $('#walkEvent'); if(!e) return;
-  e.innerHTML = `<div class="sep"></div><h3>OMBRE II — LE PORTE-FLAMME</h3><p>Passez le téléphone à <strong>Sacha</strong>. Les autres détournent les yeux.</p><p>Tu as 5 secondes pour mémoriser cette suite. <strong>Ne la récite pas tout de suite.</strong></p><div class="memory-seq memory-glow">${state.memoryPattern.join(' ')}</div><div class="small center" id="countdown">5</div>`;
-  let n = 5;
+  e.innerHTML = `<div class="sep"></div><h3>LE SOUVENIR — PORTE-FLAMME</h3><p>Passez le téléphone à <strong>Sacha</strong>. Les autres détournent les yeux.</p><p>Observe cette suite aussi longtemps que nécessaire. Elle restera visible pendant <strong>15 secondes maximum</strong>.</p><div class="memory-seq memory-glow">${state.memoryPattern.join(' ')}</div><div class="small center">Temps restant : <span id="countdown">15</span> s</div><button type="button" class="btn secondary" id="memoryReady">Je l’ai mémorisée</button>`;
+  let n = 15;
+  let finished=false;
+  const finish=()=>{
+    if(finished) return; finished=true; clearInterval(id); activeWalkEvent=null;
+    e.innerHTML = '<div class="hint-box">Sacha, garde l’ordre en mémoire. Bientôt, Vadim aura une grille que lui seul ne pourra pas résoudre.</div>';
+  };
+  $('#memoryReady').onclick=finish;
   const id = setInterval(()=>{
     n--;
     const c = $('#countdown'); if(c) c.textContent = n;
-    if(n <= 0){
-      clearInterval(id);
-      e.innerHTML = '<div class="hint-box">Sacha, garde l’ordre en mémoire. Bientôt, Vadim aura une grille que lui seul ne pourra pas résoudre.</div>';
-    }
+    if(n <= 0) finish();
   }, 1000);
 }
 
 function showMemoryTest(){
-  haptic(); omen('OMBRE II','Le Cryptographe reçoit la grille');
+  activeWalkEvent='memoryTest';
+  haptic(); omen('LA GRILLE','Le Cryptographe reçoit le message');
   const e = $('#walkEvent'); if(!e) return;
-  e.innerHTML = `<div class="sep"></div><h3>OMBRE II — LE CRYPTOGRAPHE</h3>
+  e.innerHTML = `<div class="sep"></div><h3>LA GRILLE — CRYPTOGRAPHE</h3>
     <p>Passez le téléphone à <strong>Vadim</strong>. Demande maintenant à Sacha de réciter les quatre symboles dans l’ordre.</p>
     <div class="teen-challenge">
       <div class="teen-label">Grille des quatre signes</div>
@@ -609,10 +859,11 @@ function showMemoryTest(){
   $('#memoryWordBtn').onclick = ()=>{
     if($('#memoryWord').value.trim().toUpperCase() === 'NEUF'){
       state.walk.memoryDone = true;
+      activeWalkEvent=null;
       state.fragments.vadim = '9';
       saveState();
       successSound();
-      omen('TROISIÈME FRAGMENT','Le nombre neuf est révélé');
+      omen('TROISIÈME FRAGMENT','La grille cède enfin son secret.');
       setTimeout(()=>renderFragment('Vadim','9','ᚱ','Mémoire', renderWalk),550);
     } else {
       failSound();
@@ -622,9 +873,10 @@ function showMemoryTest(){
 }
 
 function showShadow3(){
-  haptic([100,70,100]); omen('OMBRE III','La Gardienne doit juger le vrai du faux');
+  activeWalkEvent='shadow3';
+  haptic([100,70,100]); omen('LE JUGEMENT','La Gardienne doit distinguer le vrai du faux');
   const e = $('#walkEvent'); if(!e) return;
-  e.innerHTML = `<div class="sep"></div><h3>OMBRE III — LA GARDIENNE</h3>
+  e.innerHTML = `<div class="sep"></div><h3>LE JUGEMENT — GARDIENNE</h3>
     <p>Passez le téléphone à <strong>Louise</strong>.</p>
     <p class="quote">Quatre pierres parlent. Une seule dit la vérité. Les trois autres mentent.</p>
     <div class="logic-stones">
@@ -639,7 +891,7 @@ function showShadow3(){
     <div id="louiseMsg"></div>`;
   $('#louiseReveal').onclick = ()=>{
     if($('#louiseLogic').value.trim() === '2'){
-      state.fragments.louise='2'; saveState(); successSound();
+      state.fragments.louise='2'; state.walk.shadow3=true; activeWalkEvent=null; saveState(); successSound();
       omen('QUATRIÈME FRAGMENT','La Gardienne a démasqué les mensonges');
       setTimeout(()=>renderFragment('Louise','2','🗝','Gardienne', renderWalk),550);
     } else {
@@ -655,9 +907,10 @@ function renderGateChapelle(){
     ${chapterBadge('Approche finale','La Maison de Pierre')}
     <h2>Le dernier seuil</h2>
     <p class="quote">Cherchez la maison de pierre qui n’est ni une maison, ni une église de village. Elle porte le nom d’une femme.</p>
-    ${illustrationBlock('chapel','La maison de pierre','La chapelle garde la dernière énigme et l’ordre du rituel.')}
+    ${illustrationBlock('chapel','La maison de pierre','Au bout du chemin, une pierre ancienne attend le dernier serment.')}
     <p class="story">Le Livre s’approche de sa dernière page. Dès que vous serez devant la bonne pierre, le sceau tentera une dernière résistance.</p>
     ${destinationBlock('Repère du Livre', 'Chapelle Sainte-Madeleine — Layer-sur-Roche', 'Rejoignez la chapelle. La finale se déclenchera automatiquement dans le rayon configuré.')}
+    ${suspensePanel('Le seuil résiste encore','La Maison de Pierre sent votre présence. Encore quelques pas avant le dernier rituel.')}
     <div id="geoStatus">${geoStatusHtml()}</div>
     <div class="distance" id="liveDistance" data-target="chapelle">${fmtDistance(distanceTo('chapelle'))}</div>
     <div class="small center">Le sceau réagira à ${l.radius} m.</div>
@@ -669,7 +922,7 @@ function renderFinale(){
   state.screen='finale'; saveState(); haptic([180,90,180]); omen('LE SCEAU DE LAYER','Dernière épreuve');
   app.innerHTML = `<div class="blackout">${card(`
     ${chapterBadge('Sainte-Madeleine','Le Sceau de Layer')}
-    ${illustrationBlock('chapel','Le Sceau de Layer','La pierre ne cède qu’aux Veilleurs qui rétablissent l’ordre du rituel.')}
+    ${illustrationBlock('chapel','Le Sceau de Layer','Le cercle ancien ne répond qu’aux Veilleurs encore unis.')}
     <div class="seal-ring"><span>✦</span></div>
     <h2 id="lateText">TROP TARD.</h2>
     <div id="finalBody" class="hidden">
@@ -685,10 +938,10 @@ function renderFinale(){
         </div>
         <p class="small">Touchez les quatre emblèmes dans l’ordre que vous déduisez.</p>
         <div class="symbol-picks" id="symbolPicks">
+          <button type="button" data-sym="K" data-icon="🗝">🗝</button>
+          <button type="button" data-sym="R" data-icon="ᚱ">ᚱ</button>
           <button type="button" data-sym="F" data-icon="🔥">🔥</button>
           <button type="button" data-sym="E" data-icon="👁">👁</button>
-          <button type="button" data-sym="R" data-icon="ᚱ">ᚱ</button>
-          <button type="button" data-sym="K" data-icon="🗝">🗝</button>
         </div>
         <div class="order-slots" id="orderSlots"><span>?</span><span>?</span><span>?</span><span>?</span></div>
         <button type="button" class="btn secondary" id="orderReset">Effacer l’ordre</button>
@@ -734,7 +987,7 @@ function renderFinale(){
       if($('#sealCode').value.trim()==='1292'){
         sealRecoveredSound(); successSound(); complete('finale'); omen('LE SCEAU SE REFERME','Les quatre Veilleurs ont réussi');
         document.body.classList.add('seal-closed');
-        setTimeout(()=>{document.body.classList.remove('seal-closed');renderTreasure();},900);
+        finalSealShow(()=>{document.body.classList.remove('seal-closed');renderTreasure();});
       } else {
         failSound(); $('#finalMsg').innerHTML='<p class="error">Les fragments sont bons, mais pas dans cet ordre. Faites parler les quatre Veilleurs selon le rituel que vous venez de retrouver.</p>';
       }
@@ -746,9 +999,9 @@ function renderTreasure(){
   state.screen='treasure'; saveState();
   app.innerHTML = card(`
     ${chapterBadge('Le sceau est refermé','Le Livre se souvient')}
-    ${illustrationBlock('treasure','Le trésor des Veilleurs','La pierre est close, mais une récompense demeure au-delà du sceau.')}
+    ${illustrationBlock('treasure','Le trésor des Veilleurs','Le cercle s’apaise et laisse place à la récompense des Veilleurs.')}
     <h1 class="year-mark">1292</h1>
-    <p class="story">Les quatre fragments ont reformé l’année liée à la fondation de la chapelle dans la légende du jeu. La pierre reconnaît à nouveau le serment des Veilleurs.</p>
+    <p class="story"><strong>Pourquoi 1292 ?</strong> Les quatre fragments secrets n’étaient pas un code arbitraire : réunis dans l’ordre du rituel, ils forment 1-2-9-2. Le jeu reprend ici l’année traditionnellement associée à la fondation de la chapelle Sainte-Madeleine de Layer par Raoul de Layer. C’est ce lien avec le lieu réel qui permet, dans notre légende, de refermer le sceau à l’endroit même où son histoire aurait commencé.</p>
     <div class="sep"></div>
     <p class="quote">Vadim. Louise. Soline. Sacha. Quatre nouveaux noms sont désormais inscrits dans le Livre des Veilleurs.</p>
     <div class="sep"></div>
@@ -758,7 +1011,7 @@ function renderTreasure(){
     <p class="center"><strong>Le trésor des Veilleurs vous attend.</strong></p>
     ${btn('Terminer le récit', 'finishBtn', 'good')}
   `, 'chapter-card');
-  $('#finishBtn').onclick = ()=>{ complete('treasure'); state.screen='done'; saveState(); renderDone(); };
+  $('#finishBtn').onclick = ()=>{ complete('treasure'); state.screen='done'; saveState(); transitionStep('Le Livre se referme','Le nom des Veilleurs reste inscrit', renderDone, '✦'); };
 }
 
 function renderDone(){
@@ -791,10 +1044,11 @@ function simulatePositionAt(key){
   simulatedPosition=true; liveTick();
 }
 function resetWalkTestFlags(){
-  state.walk={shadow1:false,memoryShown:false,memoryDone:false,shadow3:false};
+  state.walk={shadow1:false,observerDone:false,memoryShown:false,memoryDone:false,shadow3:false};
   delete state.fragments.vadim; delete state.fragments.louise; saveState();
 }
 function prepareWalkTest(){
+  activeWalkEvent=null;
   setSimulatedDistance(3000,false);
   state.screen='walk'; saveState();
   renderWalk();
@@ -804,14 +1058,16 @@ function testShowWalkEvent(kind){
   const e=$('#walkEvent'); if(e) e.innerHTML='';
   if(kind==='shadow1'){
     state.walk.shadow1=true; saveState(); showShadow1();
+  }else if(kind==='observer'){
+    state.walk.shadow1=true; state.walk.observerDone=false; saveState(); showObserverChallenge();
   }else if(kind==='memoryShow'){
-    state.walk.shadow1=true; state.walk.memoryShown=true; saveState(); showMemoryPattern();
+    state.walk.shadow1=true; state.walk.observerDone=true; state.walk.memoryShown=true; saveState(); showMemoryPattern();
   }else if(kind==='memoryTest'){
-    state.walk.shadow1=true; state.walk.memoryShown=true; state.walk.memoryDone=false; saveState(); showMemoryTest();
+    state.walk.shadow1=true; state.walk.observerDone=true; state.walk.memoryShown=true; state.walk.memoryDone=false; saveState(); showMemoryTest();
   }else if(kind==='shadow3'){
-    state.walk.shadow1=true; state.walk.memoryShown=true; state.walk.memoryDone=true; state.walk.shadow3=true; saveState(); showShadow3();
+    state.walk.shadow1=true; state.walk.observerDone=true; state.walk.memoryShown=true; state.walk.memoryDone=true; state.walk.shadow3=false; saveState(); showShadow3();
   }else if(kind==='approach'){
-    state.walk={shadow1:true,memoryShown:true,memoryDone:true,shadow3:true}; saveState();
+    state.walk={shadow1:true,observerDone:true,memoryShown:true,memoryDone:true,shadow3:true}; saveState();
     setSimulatedDistance(250,true);
   }
 }
@@ -822,6 +1078,7 @@ function testAdvanceCurrent(){
     case 'gate-fontaine': simulatePositionAt('fontaine'); break;
     case 'walk': {
       if(!state.walk.shadow1) testShowWalkEvent('shadow1');
+      else if(!state.walk.observerDone) testShowWalkEvent('observer');
       else if(!state.walk.memoryShown) testShowWalkEvent('memoryShow');
       else if(!state.walk.memoryDone) testShowWalkEvent('memoryTest');
       else if(!state.walk.shadow3) testShowWalkEvent('shadow3');
@@ -858,7 +1115,8 @@ function initLocalTestToolbar(){
       <button type="button" id="localGo">Afficher cette étape</button>
       <div class="local-test-walk">
         <span>Événements de la Marche</span>
-        <button data-walk-event="shadow1">Ombre I</button>
+        <button data-walk-event="shadow1">Épreuve 1</button>
+        <button data-walk-event="observer">Soline</button>
         <button data-walk-event="memoryShow">Sacha</button>
         <button data-walk-event="memoryTest">Vadim</button>
         <button data-walk-event="shadow3">Louise</button>
@@ -872,7 +1130,7 @@ function initLocalTestToolbar(){
   $('.local-test-toggle',dock).onclick=()=>panel.classList.toggle('open');
   $('#localAdvance',dock).onclick=()=>{testAdvanceCurrent();panel.classList.remove('open');};
   $('#localGo',dock).onclick=()=>{testGo($('#localStage',dock).value);panel.classList.remove('open');};
-  $('#localReset',dock).onclick=()=>{state=clone(DEFAULT_STATE);saveState();currentPosition=null;simulatedPosition=false;renderHome();panel.classList.remove('open');};
+  $('#localReset',dock).onclick=()=>{activeWalkEvent=null;state=clone(DEFAULT_STATE);saveState();currentPosition=null;simulatedPosition=false;renderHome();panel.classList.remove('open');};
   $('#localWalkReset',dock).onclick=()=>{resetWalkTestFlags();prepareWalkTest();panel.classList.remove('open');};
   $$('[data-walk-event]',dock).forEach(b=>b.onclick=()=>{testShowWalkEvent(b.dataset.walkEvent);panel.classList.remove('open');});
 }
@@ -898,7 +1156,7 @@ function locRow(key){
 }
 function openGmPanel(){
   const m = modal(`<div class="kicker">Administration</div><h2>Maître du jeu</h2><p class="small">Le calibrage est stocké uniquement dans ce navigateur.</p><h3>Coordonnées</h3>${Object.keys(config.locations).map(locRow).join('')}
-  <div class="sep"></div><h3>Réglages</h3><label>Code PIN adulte</label><input class="input" id="pinCfg" value="${escapeHtml(config.gmPin)}"><label>Code du coffre</label><input class="input" id="treasureCfg" value="${escapeHtml(config.treasureCode)}">
+  <div class="sep"></div><h3>Réglages</h3><label>Code PIN adulte</label><input class="input" id="pinCfg" value="${escapeHtml(config.gmPin)}"><label>Code du coffre</label><input class="input" id="treasureCfg" value="${escapeHtml(config.treasureCode)}"><label class="admin-check"><input type="checkbox" id="countdownCfg" ${config.countdownEnabled?'checked':''}> Activer le décompte avant l’aventure</label><label>Date et heure d’ouverture</label><input class="input" id="unlockCfg" type="datetime-local" value="${escapeHtml(config.unlockAt || '')}"><p class="small">En mode test local, ce verrou est ignoré.</p>
   <button class="btn" id="saveSettings">Enregistrer les réglages</button>
   <div class="sep"></div><h3>Test / secours</h3><div class="admin-grid"><button class="btn secondary force" data-go="renderMairie">Forcer Mairie</button><button class="btn secondary force" data-go="renderEglise">Forcer Église</button><button class="btn secondary force" data-go="renderFontaine">Forcer Fontaine</button><button class="btn secondary force" data-go="renderWalk">Forcer Marche</button><button class="btn secondary force" data-go="renderFinale">Forcer Finale</button><button class="btn secondary force" data-go="renderTreasure">Afficher Trésor</button></div>
   <div class="sep"></div><h3>Sauvegarde du calibrage</h3><button class="btn" id="exportCfg">Exporter la configuration JSON</button><label class="btn secondary" style="display:block;text-align:center">Importer une configuration JSON<input id="importCfg" type="file" accept="application/json" class="hidden"></label>
@@ -933,6 +1191,8 @@ function openGmPanel(){
   $('#saveSettings', m).onclick = ()=>{
     config.gmPin = $('#pinCfg', m).value.trim() || '4826';
     config.treasureCode = $('#treasureCfg', m).value.trim() || '3147';
+    config.countdownEnabled = $('#countdownCfg', m).checked;
+    config.unlockAt = $('#unlockCfg', m).value || '2026-10-31T15:45';
     saveConfig();
     $('#adminMsg', m).innerHTML = '<p class="success">Réglages enregistrés.</p>';
   };
@@ -956,7 +1216,7 @@ updateSoundButton();
 $('#soundButton')?.addEventListener('click', ()=>{
   soundEnabled=!soundEnabled;
   localStorage.setItem('veilleurs_sound', soundEnabled?'on':'off');
-  if(soundEnabled){ startAmbient(); tone(220,.12,'sine',.018); } else stopAmbient();
+  if(soundEnabled){ startAmbient(); tone(329.63,.2,'sine',.035); setTimeout(()=>tone(440,.24,'sine',.025),120); } else stopAmbient();
   updateSoundButton();
 });
 document.addEventListener('pointerdown', ()=>{ if(soundEnabled) startAmbient(); }, {once:true});
