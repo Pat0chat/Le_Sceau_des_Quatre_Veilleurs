@@ -1,11 +1,11 @@
 # Le Sceau des Quatre Veilleurs
 
-Jeu Halloween géolocalisé pour Vadim (12 ans), Louise (14 ans), Soline (9 ans) et Sacha (7 ans), conçu pour Bissey-la-Côte puis Layer-sur-Roche.
+Jeu géolocalisé et immersif pour Vadim (12 ans), Louise (14 ans), Soline (9 ans) et Sacha (7 ans), conçu pour Bissey-la-Côte puis Layer-sur-Roche.
 
 ## Contenu
 
 - `index.html` : page principale
-- `styles.css` : ambiance Halloween responsive
+- `styles.css` : habillage immersif responsive
 - `app.js` : jeu, GPS, énigmes, sauvegarde et mode maître du jeu
 - `manifest.json` + `sw.js` : fonctionnement PWA / hors connexion après premier chargement
 
@@ -64,6 +64,6 @@ Ces seuils sont dans `app.js`, objet `DEFAULT_CONFIG.walkThresholds`, et sont é
 - code narratif final : `1292`
 - code coffre par défaut : `3147` (modifiable dans le mode maître du jeu)
 
-## Test avant Halloween
+## Test avant le jour J
 
 Faire une répétition adulte complète sur l’itinéraire réel, vérifier la sécurité du chemin vers Layer-sur-Roche et tester les quatre déclenchements géographiques avec le téléphone qui sera utilisé le jour J.
