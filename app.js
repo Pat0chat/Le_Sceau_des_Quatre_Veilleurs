@@ -106,6 +106,7 @@ function hintsHtml(stageId, hints){
 function bindHints(rerender){ $$('.hint-btn').forEach(b => b.onclick = ()=>{ const s = b.dataset.stage; state.hints[s] = (state.hints[s] || 0) + 1; saveState(); rerender(); }); }
 function chapterBadge(title, subtitle=''){ return `<div class="chapter-badge"><span>${escapeHtml(title)}</span>${subtitle?`<small>${escapeHtml(subtitle)}</small>`:''}</div>`; }
 function loreBlock(title, text){ return `<div class="lore-block"><div class="lore-title">${escapeHtml(title)}</div><p>${text}</p></div>`; }
+function destinationBlock(title, detail, note=''){ return `<div class="destination-block"><div class="destination-icon">⌖</div><div><div class="destination-title">${escapeHtml(title)}</div><div class="destination-detail">${escapeHtml(detail)}</div>${note?`<div class="destination-note">${escapeHtml(note)}</div>`:''}</div></div>`; }
 
 async function requestWakeLock(){ try { if('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen'); } catch {} }
 function startGeo(){
@@ -178,7 +179,8 @@ function renderGateMairie(){
   app.innerHTML = card(`
     ${chapterBadge('Chapitre I','Le Premier Appel')}
     <h2>Rejoindre le point d’éveil</h2>
-    <p class="story">Le Livre ne peut prononcer la suite qu’au lieu où les nouveaux Veilleurs sont appelés. Avancez jusqu’au point de départ pour entendre la première injonction.</p>
+    <p class="story">Le Livre ne peut prononcer la suite qu’au lieu où les nouveaux Veilleurs sont appelés. Rejoignez le cœur du village pour entendre la première injonction.</p>
+    ${destinationBlock('Repère du Livre', 'Mairie de Bissey-la-Côte — 9 rue Haute', 'Le sceau se déverrouillera automatiquement à proximité.')}
     <div id="geoStatus">${geoStatusHtml()}</div>
     <div class="distance" id="liveDistance" data-target="mairie">${fmtDistance(distanceTo('mairie'))}</div>
     <div class="small center">Rayon de déverrouillage : ${l.radius} m</div>
@@ -206,6 +208,7 @@ function renderGateEglise(){
     ${chapterBadge('Épreuve I','La Pierre du Temps')}
     <h2>Approchez du premier sceau</h2>
     <p class="story">Les cloches ne gardent pas seulement l’heure. Elles veillent sur la date qui ouvrira la première marque.</p>
+    ${destinationBlock('Repère du Livre', 'Église de la Nativité — rue Haute', 'Cherchez le clocher dans le village ; l’épreuve s’ouvrira lorsque vous serez assez près.')}
     <div id="geoStatus">${geoStatusHtml()}</div>
     <div class="distance" id="liveDistance" data-target="eglise">${fmtDistance(distanceTo('eglise'))}</div>
     <div class="small center">Déverrouillage à ${l.radius} m</div>
@@ -280,6 +283,7 @@ function renderGateFontaine(){
     <h2>Descendre vers l’eau</h2>
     <p class="quote">Descendez là où la pierre donne à boire. Quelque chose vous y regarde depuis 1861.</p>
     <p class="story">Le second sceau n’est pas gardé par un homme, mais par une présence sculptée qui ne quitte jamais son bassin.</p>
+    ${destinationBlock('Repère du Livre', 'Fontaine-abreuvoir — rue de l’Abreuvoir', 'Depuis l’église, descendez vers la rue de l’Abreuvoir et cherchez la fontaine de pierre.')}
     <div id="geoStatus">${geoStatusHtml()}</div>
     <div class="distance" id="liveDistance" data-target="fontaine">${fmtDistance(distanceTo('fontaine'))}</div>
     ${!targetPoint('fontaine')
@@ -358,8 +362,8 @@ function renderWalkIntro(){
     <p class="quote">Vous quittez maintenant le domaine des vivants.</p>
     <p class="story">Les deux premières marques ont été retrouvées. Mais le Livre devient plus sombre : au-delà du village, la route vers Layer n’est plus un simple chemin. C’est l’épreuve même des Veilleurs.</p>
     ${loreBlock('Ce qui vous attend', 'La distance jusqu’à la chapelle sera votre seul repère. À mesure que vous approcherez, l’Ombre vous éprouvera et révélera deux nouveaux fragments.')}
-    <p>Destination : <strong>Layer-sur-Roche</strong>.</p>
-    <p class="small">À partir d’ici, l’adulte responsable suit l’itinéraire pédestre reconnu à l’avance. Le téléphone ne donne que la distance jusqu’à la chapelle.</p>
+    ${destinationBlock('Destination', 'Hameau de Layer-sur-Roche — vers la chapelle Sainte-Madeleine', 'Suivez l’itinéraire pédestre reconnu à l’avance. Le téléphone indique la distance restante, pas le chemin à emprunter.')}
+    <p class="small">À partir d’ici, l’adulte responsable guide le groupe sur l’itinéraire préparé. Le téléphone devient un radar et déclenche les épreuves au fur et à mesure de l’approche.</p>
     ${btn('Entrer dans la Marche des Ombres', 'walkBtn')}
   `, 'chapter-card');
   $('#walkBtn').onclick = ()=>{ complete('walk-intro'); renderWalk(); };
@@ -382,6 +386,7 @@ function renderWalk(){
   app.innerHTML = card(`
     ${chapterBadge('Chapitre II','La Marche des Ombres')}
     <h2>Ne vous séparez jamais</h2>
+    ${destinationBlock('Cap à tenir', 'Chapelle Sainte-Madeleine — Layer-sur-Roche', 'L’adulte guide le chemin ; le radar mesure seulement votre approche de la chapelle.')}
     <div id="geoStatus">${geoStatusHtml()}</div>
     <div class="radar"></div>
     <div class="distance" id="walkDistance">${fmtDistance(w.d)}</div>
@@ -465,6 +470,7 @@ function renderGateChapelle(){
     <h2>Le dernier seuil</h2>
     <p class="quote">Cherchez la maison de pierre qui n’est ni une maison, ni une église de village. Elle porte le nom d’une femme.</p>
     <p class="story">Le Livre s’approche de sa dernière page. Dès que vous serez devant la bonne pierre, le sceau tentera une dernière résistance.</p>
+    ${destinationBlock('Repère du Livre', 'Chapelle Sainte-Madeleine — Layer-sur-Roche', 'Rejoignez la chapelle. La finale se déclenchera automatiquement dans le rayon configuré.')}
     <div id="geoStatus">${geoStatusHtml()}</div>
     <div class="distance" id="liveDistance" data-target="chapelle">${fmtDistance(distanceTo('chapelle'))}</div>
     <div class="small center">Le sceau réagira à ${l.radius} m.</div>
