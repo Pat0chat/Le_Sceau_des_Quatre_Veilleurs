@@ -1,8 +1,9 @@
-const CACHE='veilleurs-veuxhaulles-v11';
+const CACHE='veilleurs-veuxhaulles-v16';
 const ASSETS=[
   './','./index.html','./styles.css','./app.js','./manifest.json',
   './assets/book.png','./assets/church.png','./assets/walk.png','./assets/treasure.png',
-  './assets/veuxhaulles-etang.png','./assets/veuxhaulles-seuil.png','./assets/veuxhaulles-pont.png','./assets/veuxhaulles-tour-eau.png',
+  './assets/symbol-eye.png','./assets/symbol-water.png','./assets/symbol-passage.png','./assets/symbol-iron.png',
+  './assets/ambience.ogg',
   './assets/bg-landing.png','./assets/bg-church.png','./assets/bg-pond.png','./assets/bg-bridge.png','./assets/bg-tower.png','./assets/bg-return.png','./assets/bg-final.png'
 ];
 self.addEventListener('install',e=>e.waitUntil(caches.open(CACHE).then(c=>c.addAll(ASSETS)).then(()=>self.skipWaiting())));
