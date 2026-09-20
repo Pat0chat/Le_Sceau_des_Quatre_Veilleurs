@@ -1,108 +1,68 @@
-# Le Sceau des Quatre Veilleurs
+# Le Sceau des Quatre Passages — Veuxhaulles-sur-Aube
 
-Jeu géolocalisé et immersif pour Vadim (12 ans), Louise (14 ans), Soline (9 ans) et Sacha (7 ans), conçu pour Bissey-la-Côte puis Layer-sur-Roche.
+Aventure géolocalisée conçue pour Vadim (12 ans), Louise (14 ans), Soline (9 ans) et Sacha (7 ans).
+Durée visée : environ 2 heures, selon la marche et le temps consacré aux énigmes.
 
-## Contenu
+## Parcours
 
-- `index.html` : page principale
-- `styles.css` : habillage immersif responsive
-- `app.js` : jeu, GPS, énigmes, animations, ambiance sonore, sauvegarde et mode maître du jeu
-- `manifest.json` + `sw.js` : fonctionnement PWA / hors connexion après premier chargement
+1. Église Saint-Pierre-ès-Liens — Les Yeux de Verre
+2. Seuil / étangs — Le Seuil de l’Eau
+3. Vieux pont de pierre — Le Passage de Pierre
+4. Ancienne tour d’eau ferroviaire — Le Gardien du Fer
+5. Retour à l’église — Le Rituel des Quatre
+
+Les coordonnées de l’église sont préremplies à titre indicatif. Les coordonnées du seuil, du pont et de la tour doivent être relevées lors d’une reconnaissance sur place depuis les points exacts où les enfants devront rester.
+
+## Calibrage GPS
+
+Ouvrir le site, puis toucher ⚙.
+PIN par défaut : 4826.
+
+Pour chaque étape :
+- se placer exactement au point de jeu souhaité ;
+- cliquer sur « Utiliser ma position actuelle » ;
+- choisir un rayon de déclenchement ;
+- enregistrer ;
+- exporter la configuration JSON quand tout est prêt.
+
+Conseils : 50 à 70 m pour les lieux faciles à approcher, 70 à 100 m pour la tour afin que l’énigme puisse être jouée à distance des voies.
+
+## Réponses de terrain configurables
+
+Le mode maître du jeu permet de modifier :
+- le nombre de vitraux en façade de l’église (3 par défaut) ;
+- le nombre d’ouvertures de la barrière au-dessus du seuil d’eau (5 par défaut — à confirmer lors de la reconnaissance) ;
+- le nombre d’arches du vieux pont (3 par défaut).
+
+Ces nombres deviennent automatiquement les clés des énigmes adolescentes. Il est donc possible de corriger un comptage sans recoder le site.
+
+## Sécurité
+
+La tour d’eau est utilisée uniquement comme décor visible depuis un point sûr. Le jeu ne demande jamais de marcher sur les voies, de traverser les rails hors d’un passage autorisé, de descendre sur un ouvrage hydraulique, d’entrer dans l’eau ou de grimper sur le pont.
+
+Reconnaître l’intégralité du trajet avec un adulte avant le jour J et calibrer les points GPS sur l’itinéraire réellement retenu.
+
+## Test local sous Windows
+
+Double-cliquer sur `TEST-LOCAL.bat`.
+Le navigateur ouvre :
+
+`http://localhost:8080/?test=1`
+
+Un bouton 🧪 apparaît en bas à gauche. Il permet d’ouvrir directement chaque énigme et de simuler l’arrivée GPS à chaque lieu, y compris les étapes qui ne sont pas encore calibrées.
+
+Le service worker est désactivé en mode test local afin qu’un simple F5 recharge les dernières modifications.
 
 ## Mise en ligne
 
-La géolocalisation des navigateurs exige **HTTPS** (ou `localhost` pour tester sur ordinateur). Le site peut être publié tel quel sur GitHub Pages, Netlify, Cloudflare Pages, Vercel ou tout hébergeur HTTPS statique.
-
-Il n’utilise aucune bibliothèque externe et n’envoie aucune position vers un serveur.
-
-### Ambiance
-
-Le bouton **🔊** en bas à droite active ou coupe l’ambiance sonore générée par le navigateur. Le site ajoute également des transitions de chapitres, apparitions de sceaux, runes flottantes, effets de réussite/erreur et animations spécifiques à la finale.
+Publier le contenu du dossier sur un hébergement HTTPS (GitHub Pages, Netlify, Cloudflare Pages, Vercel…). HTTPS est nécessaire pour la géolocalisation sur smartphone.
 
 
-## Test local sur PC (sans publication)
+## Page d’accueil immersive
+La version actuelle s’ouvre sur une véritable page d’accueil distincte du récit. Elle permet d’entrer dans le Livre ou de reprendre une progression sauvegardée. Les décors de fond changent ensuite selon le passage en cours (église, eau, pont, tour, retour et finale), avec brume et effets de profondeur.
 
-Le dossier contient **`TEST-LOCAL.bat`**. Sous Windows :
+## Verrouillage avant le jour J
 
-1. décompressez le dossier ;
-2. double-cliquez sur `TEST-LOCAL.bat` ;
-3. le navigateur s’ouvre automatiquement sur `http://localhost:8080/?test=1` ;
-4. gardez la fenêtre noire ouverte pendant le test ;
-5. faites `Ctrl+C` dans cette fenêtre pour arrêter le serveur.
+Dans le mode Maître du jeu (⚙), la section **Verrouillage de l’aventure** permet d’activer un blocage jusqu’à une date et une heure précises. Avant ce moment, la page d’accueil affiche un Livre scellé et un compte à rebours ; les joueurs ne peuvent pas entrer dans l’aventure. Le mode local `?test=1` ignore volontairement ce verrou pour les essais.
 
-Python 3 doit être installé sur le PC. Le script accepte aussi un autre port : par exemple `TEST-LOCAL.bat 9000`.
-
-### Barre de simulation 🧪
-
-Lorsque l’adresse contient `?test=1`, une barre **TEST LOCAL** apparaît en bas à gauche. Elle permet :
-
-- d’aller directement à n’importe quelle étape ;
-- de simuler l’arrivée à la mairie, à l’église, à la fontaine et à la chapelle ;
-- d’ouvrir directement chacune des épreuves de la Marche des Ombres : **Ombre I**, **mémoire de Sacha**, **grille de Vadim**, **logique de Louise** et **approche de la chapelle** ;
-- de remettre uniquement la Marche à zéro, sans recommencer tout le jeu ;
-- de réinitialiser toute la progression locale.
-
-Les boutons de la Marche sont indépendants de l’état précédent : vous pouvez tester directement Vadim ou Louise sans avoir joué les événements précédents.
-
-Le mode test ne demande pas la position réelle du PC. Il désactive également le service worker et vide son cache, afin qu’un simple rafraîchissement affiche toujours les dernières modifications des fichiers.
-
-Pour tester le comportement normal du site sur `localhost` avec la vraie géolocalisation du navigateur, ouvrez simplement `http://localhost:8080/` **sans** `?test=1`.
-
-## Mode maître du jeu
-
-Touchez le bouton **⚙** en bas à droite.
-
-Code PIN initial : **4826**
-
-Le mode adulte permet :
-
-1. d’enregistrer les coordonnées exactes de la mairie, de l’église, de la fontaine et de la chapelle ;
-2. de régler le rayon de déclenchement GPS de chaque étape ;
-3. d’exporter les coordonnées au format JSON ;
-4. de réimporter ce fichier sur un autre téléphone ;
-5. de forcer chaque étape en cas de GPS capricieux ;
-6. de changer le code du coffre ;
-7. d’effacer la progression.
-
-## Calibrage conseillé sur place
-
-Pour chaque lieu :
-
-1. placez-vous à l’endroit où vous voulez que l’étape se déclenche ;
-2. attendez que le téléphone ait une précision correcte ;
-3. ouvrez ⚙ > Maître du jeu ;
-4. cliquez sur **Utiliser ma position actuelle** ;
-5. répétez 2 ou 3 fois si la précision fluctue ;
-6. gardez un rayon de 40 à 60 m en extérieur. Montez à 70–90 m si le GPS est instable.
-
-La fontaine est volontairement **sans coordonnées par défaut** afin d’éviter une mauvaise géolocalisation. La mairie, l’église et la chapelle ont des coordonnées indicatives, à recalibrer avant le jour J.
-
-## Fonctionnement de la Marche des Ombres
-
-Les événements intermédiaires ne nécessitent pas de points GPS supplémentaires : ils se déclenchent selon la distance restante jusqu’à la chapelle.
-
-Seuils par défaut :
-
-- Ombre I : 2,3 km
-- mémoire montrée à Sacha : 1,5 km
-- test avec Vadim : 1,2 km
-- fragment de Louise : 800 m
-- approche finale : 300 m
-
-Ces seuils sont dans `app.js`, objet `DEFAULT_CONFIG.walkThresholds`, et sont également conservés dans le fichier JSON exporté.
-
-## Codes
-
-- PIN maître du jeu par défaut : `4826`
-- code narratif final : `1292`
-- code coffre par défaut : `3147` (modifiable dans le mode maître du jeu)
-
-## Test avant le jour J
-
-Faire une répétition adulte complète sur l’itinéraire réel, vérifier la sécurité du chemin vers Layer-sur-Roche et tester les quatre déclenchements géographiques avec le téléphone qui sera utilisé le jour J.
-
-## Mode décompte avant l'aventure
-
-La version actuelle active par défaut un verrou jusqu'au **31 octobre 2026 à 15:45** (heure locale du téléphone). Avant ce moment, les participants peuvent consulter l'univers et le compte à rebours, mais le bouton de lancement de l'aventure n'est pas disponible.
-
-Pour modifier ce réglage : ouvrir ⚙, entrer le PIN maître du jeu, puis utiliser **Activer le décompte avant l’aventure** et **Date et heure d’ouverture**. Le mode `?test=1` ignore volontairement le verrou afin de permettre les répétitions locales.
+La date n’est pas activée par défaut : choisissez-la dans ⚙ avant d’envoyer le lien aux joueurs.

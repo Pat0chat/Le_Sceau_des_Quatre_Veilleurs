@@ -1,12 +1,56 @@
 {
-  "version": 2,
+  "version": 6,
   "gmPin": "4826",
   "treasureCode": "3147",
   "locations": {
-    "mairie": {"name":"Mairie de Bissey-la-Côte","lat":47.9128,"lon":4.71207,"radius":55,"calibrated":false},
-    "eglise": {"name":"Église de la Nativité","lat":47.91326,"lon":4.70868,"radius":55,"calibrated":false},
-    "fontaine": {"name":"Fontaine-abreuvoir, rue de l'Abreuvoir","lat":null,"lon":null,"radius":55,"calibrated":false},
-    "chapelle": {"name":"Chapelle Sainte-Madeleine de Layer-sur-Roche","lat":47.89236,"lon":4.68423,"radius":60,"calibrated":false}
+    "church": {
+      "name": "Église Saint-Pierre-ès-Liens",
+      "detail": "Veuxhaulles-sur-Aube",
+      "lat": 47.9455556,
+      "lon": 4.8027778,
+      "radius": 55,
+      "calibrated": false
+    },
+    "pond": {
+      "name": "Le seuil des étangs",
+      "detail": "Boucle des étangs de Veuxhaulles-sur-Aube",
+      "lat": null,
+      "lon": null,
+      "radius": 65,
+      "calibrated": false
+    },
+    "bridge": {
+      "name": "Le vieux pont de pierre",
+      "detail": "Boucle des étangs de Veuxhaulles-sur-Aube",
+      "lat": null,
+      "lon": null,
+      "radius": 65,
+      "calibrated": false
+    },
+    "tower": {
+      "name": "Ancienne tour d'eau ferroviaire",
+      "detail": "Point d'observation sûr",
+      "lat": null,
+      "lon": null,
+      "radius": 80,
+      "calibrated": false
+    },
+    "final": {
+      "name": "Retour au point du serment",
+      "detail": "Église Saint-Pierre-ès-Liens",
+      "lat": 47.9455556,
+      "lon": 4.8027778,
+      "radius": 60,
+      "calibrated": false
+    }
   },
-  "walkThresholds": {"shadow1":2300,"memoryShow":1500,"memoryTest":1200,"shadow3":800,"approach":300}
+  "puzzle": {
+    "churchWindows": 3,
+    "pondOpenings": 5,
+    "bridgeArches": 3
+  },
+  "lock": {
+    "enabled": false,
+    "at": ""
+  }
 }

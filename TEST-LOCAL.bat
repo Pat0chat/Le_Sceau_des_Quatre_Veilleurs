@@ -23,7 +23,7 @@ if %errorlevel%==0 (
 )
 
 echo ============================================
-echo  Le Sceau des Quatre Veilleurs - TEST LOCAL
+echo  Le Sceau des Quatre Passages - TEST LOCAL
 echo ============================================
 echo.
 echo Adresse : http://localhost:%PORT%/?test=1

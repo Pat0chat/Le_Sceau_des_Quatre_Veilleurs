@@ -1,10 +1,10 @@
 {
-  "name": "Le Sceau des Quatre Veilleurs",
+  "name": "Le Sceau des Quatre Passages",
   "short_name": "Les Veilleurs",
   "start_url": "./",
   "display": "standalone",
   "background_color": "#0c0910",
   "theme_color": "#120d18",
   "lang": "fr-FR",
-  "description": "Aventure géolocalisée et immersive à Bissey-la-Côte et Layer-sur-Roche."
+  "description": "Aventure géolocalisée à Veuxhaulles-sur-Aube."
 }
