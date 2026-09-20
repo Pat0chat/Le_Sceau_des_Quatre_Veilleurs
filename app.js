@@ -8,12 +8,12 @@
 */
 
 const DEFAULT_CONFIG = {
-  version: 6,
+  version: 7,
   gmPin: '4826',
   treasureCode: '3147',
   lock: {
-    enabled: false,
-    at: ''
+    enabled: true,
+    at: '2026-10-28T14:30'
   },
   locations: {
     church: {
@@ -106,9 +106,13 @@ function clone(v){ return JSON.parse(JSON.stringify(v)); }
 function mergeConfig(raw){
   const base = clone(DEFAULT_CONFIG);
   if(!raw || typeof raw !== 'object') return base;
+  const rawVersion = Number(raw.version) || 0;
   if(raw.gmPin) base.gmPin = String(raw.gmPin);
   if(raw.treasureCode) base.treasureCode = String(raw.treasureCode);
-  if(raw.lock && typeof raw.lock === 'object') Object.assign(base.lock, raw.lock);
+  // Migration v7 : le lancement officiel est fixé au 28 octobre 2026 à 14 h 30.
+  // Les anciennes configurations (v6 et antérieures) héritent automatiquement de ce verrou.
+  // Une fois la v7 enregistrée, le Maître du jeu peut toujours modifier la date depuis ⚙.
+  if(rawVersion >= 7 && raw.lock && typeof raw.lock === 'object') Object.assign(base.lock, raw.lock);
   if(raw.puzzle) Object.assign(base.puzzle, raw.puzzle);
   if(raw.locations){
     Object.keys(base.locations).forEach(k => {
